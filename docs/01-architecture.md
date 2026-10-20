@@ -49,7 +49,9 @@ Five decisions shape everything else:
 **What was built (Part C)** to prove the riskiest part, the vendor semantics:
 - Ingest stubs → normalise → store → live status, nearest-available and daily settlement.
 - Coverage and density on the H3 grid, with supply-only gaps that follow live status.
-- 59 tests aimed at the failure modes.
+- The exceptions queue: the operator bills or voids a held session, enforced by row-level security, and the day's statement is re-issued.
+- Changes pushed to dashboards, with receipt → screen measured from the browser; a live simulator keeps the generated sites busy within the vendor contract.
+- 82 tests aimed at the failure modes, plus `promtool` tests for the alert rules.
 - The slice uses a Postgres inbox where production would use Kafka (decision D7).
 
 ---
