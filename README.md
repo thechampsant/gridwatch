@@ -64,7 +64,7 @@ The brief asks for "real ingestion working … one correct, useful aggregate". I
 | 429 / 500 / malformed | `src/ingest/poller.ts`, `src/ingest/processor.ts` | 429: honour `Retry-After` and resume from the same cursor. 500: jittered retries, then give up without advancing the high-water mark. Malformed: quarantine per event |
 | `docker compose up` | `docker-compose.yml` | One command, ordered by health and completion conditions |
 | IaC | `infra/terraform` | Applied to LocalStack by the `terraform` service |
-| Tests at failure modes | `test/` | 77 tests, listed below, plus the alert rules under `promtool` |
+| Tests at failure modes | `test/` | 82 tests, listed below, plus the alert rules under `promtool` |
 | Coordinates as they arrive | `src/geo/geocoder.ts` | Addresses only → override, cache, postal fallback; precision recorded; unresolved sites kept off the map |
 
 ### The stub scenario, end to end
@@ -106,6 +106,7 @@ Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) ru
 - **Webhook endpoint:** a bad signature stores nothing; a good one is acknowledged after the write.
 - **Nearest-available:** geodesic distance within 0.5% of haversine; faulted, stale and ungeocoded sites skipped with reasons; never another tenant's chargers.
 - **Geocoding:** a manual pin beats every later step; the postal fallback says it is approximate (±2 km); an address that can't be placed returns nothing instead of a guess, with the reason (no postal code, or a postal code we don't cover).
+- **Push:** a committed change is announced once, and re-reads or bad payloads announce nothing; each stream gets only its own operator's changes while staff get all; no token, no stream; reported render times feed the tile verdict, which says "measuring" below 1,000 samples; malformed or flooding reports are refused.
 - **Live simulator:** registers never fall and power never exceeds the charger; readings every 10 s; sessions bill plausibly; the same run however often it is advanced; `since` and the cursor are honoured; meter values never go by webhook and batches are held 5–60 s; the pilot sites get byte-identical responses with live mode on or off; a site polled again within 30 s gets 429.
 - **Long-running volume:** the ingestion log and vendor-call view show the newest rows and count all of them, the pilot log stays intact, and the scripted 429 and 500 stay in view.
 - **Alert rules** (`ops/prometheus/rules.test.yml`, run by `promtool` in CI): the burn-rate alert pages on a slow pipeline and stays silent on a healthy or idle one.
@@ -118,6 +119,7 @@ Full detail is in [Part A](docs/01-architecture.md). In short:
 - **Freshness.**
   - The contract's < 5 s / < 10 s targets can't be met through this vendor interface: webhooks are batched up to 60 s, polls are ≥ 30 s, and meter values come by poll only.
   - We commit to **receipt → screen ≤ 2 s P99.9**, measure the vendor's share separately (`/v1/freshness`), show data age everywhere, and negotiate the feed.
+  - The slice pushes committed changes to open dashboards and measures receipt → drawn on screen from the browser: about 0.6 s typical in the demo, most of it a deliberate 500 ms refetch throttle.
 - **Correctness.** At-least-once, unordered, no event IDs. So: natural-key idempotency at every sink, live state moves only forward in event time, sessions merge commutatively, charges are unique per session.
 - **Storage.** Postgres family in two clusters: telemetry (TimescaleDB, async, rebuildable from Kafka) and core/billing (PostGIS, RLS, synchronous replication). Kafka in front as the durable raw log; S3 as the archive; Redis for the push path.
 - **Map.**
@@ -202,7 +204,9 @@ All `/v1` routes need `Authorization: Bearer <JWT>`. The tenant comes from the t
 | `POST /v1/sessions/:connectionId/:sessionId/review` | The owning operator only: `{action: "bill", energyKwh, note}` or `{action: "void", note}`. Kept in `session_reviews` and audited; re-issues the day's statement if it was settled |
 | `GET /v1/settlement/statements?date=` | Latest statement version per operator and day |
 | `GET /v1/ingestion/events` | What happened to each event, and why |
-| `GET /v1/freshness` | Vendor age when served vs. platform latency per KPI |
+| `GET /v1/freshness` | Vendor age when served vs. platform latency per KPI; the tile KPI from browser-reported receipt → render times |
+| `GET /v1/stream` | Server-Sent Events: `hello`, then a `change` (IDs and kinds only) whenever the caller's network changes, `ping` every 15 s. Read with `fetch`, so the token stays in a header |
+| `POST /v1/freshness/render` | The dashboard reports receipt → drawn times (`{samplesMs: [...]}`, at most 100 per post, rate-limited) |
 | `GET /v1/admin/csms-calls`, `GET /v1/admin/quarantine` | Platform admins only, audited |
 | `POST /v1/admin/sites/:siteId/location` | Platform admins only, audited: pin a site (`{lat, lng, note}`), checked against the site's country. Stored as a manual override, which wins over any geocoder result |
 | `GET /metrics`, `/healthz`, `/readyz` | Operations |
@@ -214,11 +218,11 @@ docker compose exec api node dist/bin/mint-token.js acme-charge
 ```
 
 ## Where I stopped, and what's next
-**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 77 tests passing.
+**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 82 tests passing.
 
 **Next, in priority order:**
 1. **Swap the inbox for Kafka** (D7). Put `processRow` behind a consumer and test rebalances and the offset-rewind runbook after a database failover. Load-test to 20k events/s to check the sizing in Part A §10.
-2. **Push instead of poll on the dashboard.** Redis live state plus a WebSocket gateway; measure receipt → render with a browser beacon, so the "≤ 2 s P99.9" commitment is measured end to end, not only to commit.
+2. **Push at production scale.** The slice pushes over Server-Sent Events from one Postgres LISTEN per API process and measures receipt → render from the browser. Production moves this to Kafka → Redis live state → a WebSocket gateway, sends deltas applied as MapLibre `feature-state` instead of refetching, and keeps the same browser-reported measurement.
 3. **Telemetry rollups.** Continuous aggregates with `counter_agg` (reset-aware energy) and `state_agg` (utilisation), and an integer `connector_key` instead of text IDs in hypertables.
 4. **Density and coverage, production version.** The slice computes H3 density and supply-only gaps per request. Production adds admin boundary polygons in `site_regions` (mapped at geocode time, with India's official boundaries), cells materialised at geocode time, a demand layer (population, traffic) to rank gaps, and vector tiles via Martin.
 5. **Settlement operations.** Scheduled per-operator runs after local midnight, a reviewer role in Keycloak (so not every operator user can bill), credit notes for corrections after invoicing, and re-rating when a tariff changes. The exceptions queue itself is built.

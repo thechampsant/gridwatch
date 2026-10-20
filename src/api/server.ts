@@ -6,11 +6,13 @@ import type { SecretProvider } from '../archive/aws.js';
 import { ReviewError, reviewSession, type ReviewDecision } from '../billing/review.js';
 import { runSettlement } from '../billing/settlement.js';
 import { parseAsOf, type Clock } from '../clock.js';
+import { notifyChange } from '../db/changes.js';
 import { withTenant, withTx, type Client, type Pool, type TenantContext } from '../db/pool.js';
 import { CoverageError, coverageGaps, densityResError, hexDensity } from '../geo/coverage.js';
 import { registry } from '../observability/metrics.js';
 import { AuthError, issueToken, verifyToken } from './auth.js';
 import { freshnessReport } from './freshness.js';
+import { RenderSamples, type ChangeHub } from './stream.js';
 import { availableConnectors, loadSiteViews, skipReason, type SiteView } from './site-status.js';
 import { registerWebhook } from './webhook.js';
 
@@ -26,7 +28,11 @@ export interface ApiDeps {
   publicDir?: string;
   logger?: boolean;
   billing?: { tolerance: number; graceSec: number }; // defaults: 1.1 and 2 h, as in config
+  changes?: ChangeHub; // push to dashboards; off when absent
+  renders?: RenderSamples;
 }
+
+const RenderBody = z.object({ samplesMs: z.array(z.number().min(0).max(600_000)).min(1).max(100) });
 
 const ReviewBody = z.discriminatedUnion('action', [
   z.object({ action: z.literal('bill'), energyKwh: z.number().positive().max(1000), note: z.string().trim().min(5).max(500) }),
@@ -43,6 +49,9 @@ declare module 'fastify' {
 export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: deps.logger ?? false });
   app.decorateRequest('tenant', null);
+  const renders = deps.renders ?? new RenderSamples();
+  // Open streams would hold the server open; end them first.
+  app.addHook('preClose', async () => deps.changes?.closeAll());
 
   app.get('/healthz', async () => ({ ok: true }));
   app.get('/readyz', async (_req, reply) => {
@@ -341,6 +350,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       throw err;
     }
 
+    await notifyChange(deps.ingestPool, { id: null, op: result.operatorId, sites: [], kinds: ['session'], receivedAt: null });
     // The review is committed and stands on its own; re-issuing is reported
     // separately, so a settlement problem never undoes the operator's decision.
     let statement: Record<string, unknown> = { status: 'not_settled_yet' };
@@ -420,7 +430,61 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/v1/freshness', async (req) => {
     const q = req.query as Record<string, string | undefined>;
-    return run(req, (c) => freshnessReport(c, q.include_synthetic === 'true'));
+    return run(req, (c) => freshnessReport(c, q.include_synthetic === 'true', renders.stats(req.tenant!.operatorId)));
+  });
+
+  // Dashboards report how long each pushed change took to reach the screen.
+  app.post('/v1/freshness/render', async (req, reply) => {
+    const body = RenderBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'send {samplesMs: [1-100 numbers, each 0-600000]}' });
+    const key = req.tenant!.operatorId ?? 'platform_admin';
+    if (renders.add(key, body.data.samplesMs.map((ms) => ms / 1000)) === 'rate_limited') return reply.code(429).send({ error: 'too many reports; send fewer, larger batches' });
+    return reply.code(202).send({ accepted: body.data.samplesMs.length });
+  });
+
+  // One long-lived stream per dashboard: "hello", then a "change" whenever
+  // the viewer's network changes, and a heartbeat. Server-Sent Events, read
+  // with fetch(), so the token travels in a header and never in a URL.
+  app.get('/v1/stream', async (req, reply) => {
+    const hub = deps.changes;
+    if (!hub) return reply.code(503).send({ error: 'live updates are off' });
+    const tenant = req.tenant!;
+    if (tenant.role === 'platform_admin') await run(req, async () => null); // audited once, when the stream opens
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    let closed = false;
+    let beat: NodeJS.Timeout | undefined;
+    let expiry: NodeJS.Timeout | undefined;
+    let unsubscribe = () => {};
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(beat);
+      clearTimeout(expiry);
+      unsubscribe();
+      res.end();
+    };
+    const send = (event: string, data: unknown) => {
+      if (closed) return;
+      // A client that stops reading is dropped, not buffered for.
+      if (res.writableLength > 1_000_000) return close();
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    unsubscribe = hub.subscribe(tenant, send, close);
+    beat = setInterval(() => send('ping', { serverTime: new Date().toISOString() }), 15_000);
+    const ttl = (tenant.expiresAt ?? Date.now() + 8 * 3600_000) - Date.now();
+    expiry = setTimeout(() => {
+      send('expired', {});
+      close();
+    }, Math.min(Math.max(0, ttl), 2 ** 31 - 1));
+    req.raw.on('close', close);
+    send('hello', { serverTime: new Date().toISOString(), role: tenant.role, operatorId: tenant.operatorId });
   });
 
   const isAdmin = (req: FastifyRequest) => req.tenant?.role === 'platform_admin';
@@ -488,7 +552,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const lng = Number(body.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return reply.code(400).send({ error: 'lat and lng are required' });
     const site = (
-      await deps.ingestPool.query<{ site_id: string; country: string }>(`SELECT site_id, country FROM sites WHERE site_id = $1`, [
+      await deps.ingestPool.query<{ site_id: string; country: string; operator_id: string }>(`SELECT site_id, country, operator_id FROM sites WHERE site_id = $1`, [
         req.params.siteId,
       ])
     ).rows[0];
@@ -518,6 +582,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         'POST /v1/admin/sites/:siteId/location',
         JSON.stringify({ siteId: site.site_id, lat, lng, note }),
       ]);
+      await notifyChange(c, { id: null, op: site.operator_id, sites: [site.site_id], kinds: ['site'], receivedAt: null });
     });
     return { siteId: site.site_id, lat, lng, note: `Pinned by operations: ${note}` };
   });

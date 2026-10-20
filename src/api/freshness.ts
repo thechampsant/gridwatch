@@ -66,7 +66,16 @@ interface VendorStats {
 // so they describe now, not the whole history of a long-running demo.
 const WINDOW = 20_000;
 
-export async function freshnessReport(c: Client, includeSynthetic = false) {
+export interface RenderStats {
+  n: number;
+  p50Sec: number | null;
+  p95Sec: number | null;
+  p999Sec: number | null;
+}
+// A P99.9 claim needs enough samples for its tail to mean something.
+const MIN_RENDER_SAMPLES = 1000;
+
+export async function freshnessReport(c: Client, includeSynthetic = false, render: RenderStats = { n: 0, p50Sec: null, p95Sec: null, p999Sec: null }) {
   const vendor = (
     await c.query<VendorStats>(
       `SELECT o.event_type,
@@ -114,10 +123,18 @@ export async function freshnessReport(c: Client, includeSynthetic = false) {
       const mins = stats.map((s) => s.poll_min).filter((v): v is number => v !== null);
       const maxs = stats.map((s) => s.poll_max).filter((v): v is number => v !== null);
       const webhookP50 = stats.map((s) => s.webhook_p50).find((v) => v !== null) ?? null;
+      // The tile KPI is judged on what screens report (receipt -> drawn),
+      // not on receipt -> committed, which leaves out the push and the render.
       let verdict: string = k.verdict;
       if (k.verdict === 'ours') {
         verdict =
-          platformStats.p999Sec === null ? 'ours_no_data' : platformStats.p999Sec < k.targetSec ? 'ours_met' : 'ours_at_risk';
+          render.n === 0
+            ? 'ours_no_data'
+            : render.n < MIN_RENDER_SAMPLES
+              ? 'ours_measuring'
+              : render.p999Sec !== null && render.p999Sec < k.targetSec
+                ? 'ours_met'
+                : 'ours_at_risk';
       }
       return {
         key: k.key,
@@ -132,6 +149,7 @@ export async function freshnessReport(c: Client, includeSynthetic = false) {
         // Stub payloads are dated June 2026 and replayed now, so receipt lag on
         // them is months: flagged rather than presented as a measurement.
         webhookLagIsReplay: webhookP50 !== null && webhookP50 > 86_400,
+        ...(k.verdict === 'ours' ? { render: { ...render, minSamplesForP999: MIN_RENDER_SAMPLES, measures: 'receipt at the GridWatch edge -> drawn on a dashboard screen' } } : {}),
       };
     }),
   };

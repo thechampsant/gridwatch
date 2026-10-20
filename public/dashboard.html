@@ -148,7 +148,7 @@
         <li><b>The charging network reports in.</b> Each operator's charger-management system (the vendor) sends status changes in batches up to a minute apart. Each charger takes a power reading about every 10 seconds, but the vendor lets us collect them at most every 30 seconds per site. So they arrive about three at a time: we keep every reading, and the newest can be up to about 40 seconds old.</li>
         <li><b>Every update is checked.</b> Repeats are ignored, an older update never overwrites a newer one, and a broken record is set aside without losing the rest of its batch.</li>
         <li><b>It is stored per operator.</b> One operator can never see another's data; the database itself enforces it.</li>
-        <li><b>It reaches the screen in about a second.</b> Most of the delay you see comes before the data reaches us. The panels below show both parts separately.</li>
+        <li><b>It reaches the screen in about a second.</b> Each change is pushed to open dashboards as soon as it is stored, and the page times how long it took to draw. Most of the delay you see comes before the data reaches us. The panels below show both parts separately.</li>
       </ol>
     </section>
 
@@ -193,7 +193,7 @@
     <p class="small muted" id="not-admin">The vendor call log and set-aside records are for GridWatch platform admins. Switch to GridWatch admin at the top to see them.</p>
   </div>
 
-  <footer class="small muted">GridWatch take-home slice. This page refreshes every 5 s by polling; production pushes changes as they happen (Part A §7.3). Map data © OpenStreetMap contributors.</footer>
+  <footer class="small muted">GridWatch take-home slice. Changes are pushed to this page as they are committed, over one stream; it also refreshes fully every 30 s, for what time alone changes (a site going quiet). Production runs the same pattern through Kafka, Redis and a WebSocket gateway (Part A §7.3). Map data © OpenStreetMap contributors.</footer>
 </main>
 <script src="/dashboard/app.js"></script>
 </body>

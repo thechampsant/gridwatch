@@ -157,6 +157,10 @@ const state = {
   coverage: null, // /v1/coverage: hexagons, areas, countries
   gaps: null, // /v1/coverage/gaps
   layers: { density: readPref('gw.layer.density', 'false') === 'true', gaps: readPref('gw.layer.gaps', 'false') === 'true' },
+  live: { connected: false, everConnected: false, ctrl: null, retryMs: 1000, onHello: null },
+  pendingRenders: [], // pushed changes waiting to be drawn: { arrivedAt, ageAtSendMs }
+  renderSamples: [], // receipt -> drawn, in ms, waiting to be reported
+  lastFull: 0,
   reviewing: null, // draft decision on a held session; kept here so the 5 s refresh can't wipe it
   reviewMessage: null,
   gapKm: [2, 5, 10].includes(Number(readPref('gw.gapkm', '5'))) ? Number(readPref('gw.gapkm', '5')) : 5,
@@ -1028,6 +1032,7 @@ function renderFreshness(f) {
     ours_met: { text: 'Our part: met', color: '#1D5FD0', bar: 'transparent' },
     ours_at_risk: { text: 'Our part: at risk', color: '#B0302A', bar: 'transparent' },
     ours_no_data: { text: 'Our part', color: '#1D5FD0', bar: 'transparent' },
+    ours_measuring: { text: 'Our part: measuring', color: '#1D5FD0', bar: 'transparent' },
   };
   const pct = (s) => `${Math.min(100, Math.max(0, s))}%`;
   $('fresh').innerHTML = f.signals
@@ -1035,11 +1040,17 @@ function renderFreshness(f) {
       const v = VERDICT[s.verdict] ?? VERDICT.missed_at_source;
       const a = s.vendorAgeWhenServed;
       const fill = a ? `<div class="fill" style="left:${pct(a.minSec)};width:${pct(Math.max(1, a.maxSec - a.minSec))};background:${v.bar}"></div>` : '';
+      const r = s.render;
+      const ms = (sec) => `${fmtNum(sec * 1000)} ms`;
       const observed = a
         ? `${fmtNum(a.minSec)}–${fmtNum(a.maxSec)} s old when the vendor handed it over (${a.samples} update${a.samples === 1 ? '' : 's'})`
-        : s.verdict.startsWith('ours')
-          ? 'From receipt to screen, inside GridWatch'
-          : 'No samples yet';
+        : r && r.n
+          ? r.n >= r.minSamplesForP999
+            ? `Receipt to screen: ${ms(r.p999Sec)} at the 99.9th percentile over ${fmtNum(r.n)} pushed updates`
+            : `Receipt to screen: ${ms(r.p50Sec)} typical, ${ms(r.p95Sec)} at the 95th percentile over ${fmtNum(r.n)} pushed updates (a 99.9th percentile needs ${fmtNum(r.minSamplesForP999)})`
+          : s.verdict.startsWith('ours')
+            ? 'From receipt to screen, inside GridWatch: measured once changes are pushed to this page'
+            : 'No samples yet';
       return `<div class="fresh-row"><div class="top-line"><b>${esc(s.signal)}</b><span class="muted">Target under ${esc(s.targetSec)} s · ${esc(s.percentile)}</span></div><div class="track" aria-hidden="true">${fill}<div class="tick" style="left:${pct(s.targetSec)}"></div></div><div class="bottom-line"><span style="color:var(--ink-2)">${esc(observed)}</span><b style="color:${v.color}">${esc(v.text)}</b></div><div class="small muted">${esc(s.vendorFloor)}</div></div>`;
     })
     .join('');
@@ -1088,48 +1099,197 @@ function renderAdmin(adminData) {
 
 // ---- Refresh loop ----------------------------------------------------------
 
-async function refresh() {
+// What the page last loaded, so a push can refetch just one part.
+const data = { status: null, geo: null, sessions: null, statements: null, events: null, fresh: null, adminData: null };
+const dirty = new Set();
+const keep = (key, value) => {
+  if (JSON.stringify(value) === JSON.stringify(data[key])) return;
+  data[key] = value;
+  dirty.add(key);
+};
+
+async function loadStatus() {
+  const [status, geo] = await Promise.all([api('/v1/sites/status'), api('/v1/map/sites')]);
+  keep('status', status);
+  keep('geo', geo);
+}
+async function loadSessions() {
+  const [recent, statements, heldQueue] = await Promise.all([
+    api(`/v1/sessions?include_synthetic=${state.showSynthetic}`),
+    api(`/v1/settlement/statements`),
+    // The review queue on its own, so a busy network can't push it out of the newest 200.
+    api(`/v1/sessions?status=needs_review&include_synthetic=${state.showSynthetic}`),
+  ]);
+  keep('sessions', mergeSessions(heldQueue.sessions, recent.sessions));
+  keep('statements', statements.statements);
+}
+async function loadHow() {
+  const [events, fresh] = await Promise.all([api('/v1/ingestion/events'), api(`/v1/freshness?include_synthetic=${state.showSynthetic}`)]);
+  keep('events', events);
+  keep('fresh', fresh);
+  // Vendor calls and set-aside records are admin-only; operators get 403, so don't ask.
+  const adminData =
+    state.persona === 'platform_admin'
+      ? await Promise.all([api('/v1/admin/csms-calls'), api(`/v1/admin/quarantine?include_synthetic=${state.showSynthetic}`)]).then(([c, q]) => ({
+          calls: c,
+          callCounts: c.counts,
+          quarantine: q.quarantine,
+          quarantineCounts: q.counts,
+        }))
+      : null;
+  keep('adminData', adminData);
+}
+
+// Draws only the sections whose data changed.
+function renderDirty() {
+  const d = data;
+  if (!d.status || !d.sessions) return;
+  const any = (...keys) => keys.some((k) => dirty.has(k));
+  state.lastStatus = d.status;
+  state.lastSessions = d.sessions;
+  if (any('fresh') && d.fresh) renderHealth(d.fresh);
+  if (any('status', 'sessions')) {
+    renderTiles(d.status, d.sessions);
+    renderAttention(d.status, d.sessions);
+  }
+  if (any('status')) {
+    renderSites(d.status);
+    renderLocations(d.status);
+  }
+  if (any('geo') && d.geo) renderMap(d.geo);
+  if (any('sessions', 'statements')) renderSessions(d.sessions, d.statements ?? []);
+  if (any('status', 'sessions', 'statements', 'events', 'adminData') && d.events) renderFailures(d.status, d.sessions, d.statements ?? [], d.events, d.adminData);
+  if (any('fresh') && d.fresh) renderFreshness(d.fresh);
+  if (any('events') && d.events) renderLog(d.events);
+  if (any('adminData')) renderAdmin(d.adminData);
+  dirty.clear();
+  renderUpdated();
+}
+
+function renderUpdated() {
+  const at = data.status ? new Date(data.status.asOf).toLocaleTimeString() : '…';
+  $('updated').textContent = state.live.connected ? `Live · updated ${at}` : `Updated ${at} · reconnecting, checking every 5 s`;
+}
+
+async function refreshParts(parts) {
   try {
-    const [status, geo, recent, statements, events, fresh, heldQueue] = await Promise.all([
-      api('/v1/sites/status'),
-      api('/v1/map/sites'),
-      api(`/v1/sessions?include_synthetic=${state.showSynthetic}`),
-      api(`/v1/settlement/statements`),
-      api('/v1/ingestion/events'),
-      api(`/v1/freshness?include_synthetic=${state.showSynthetic}`),
-      // The review queue on its own, so a busy network can't push it out of the newest 200.
-      api(`/v1/sessions?status=needs_review&include_synthetic=${state.showSynthetic}`),
-    ]);
-    const sessions = { sessions: mergeSessions(heldQueue.sessions, recent.sessions) };
-    // Vendor calls and set-aside records are admin-only; operators get 403, so don't ask.
-    const adminData =
-      state.persona === 'platform_admin'
-        ? await Promise.all([api('/v1/admin/csms-calls'), api(`/v1/admin/quarantine?include_synthetic=${state.showSynthetic}`)]).then(([c, q]) => ({
-            calls: c,
-            callCounts: c.counts,
-            quarantine: q.quarantine,
-            quarantineCounts: q.counts,
-          }))
-        : null;
-    state.lastStatus = status;
-    state.lastSessions = sessions.sessions;
+    await Promise.all([parts.has('status') && loadStatus(), parts.has('sessions') && loadSessions(), parts.has('how') && loadHow()].filter(Boolean));
     $('error').hidden = true;
-    $('updated').textContent = `Updated ${new Date(status.asOf).toLocaleTimeString()} · refreshes every 5 s`;
-    renderHealth(fresh);
-    renderTiles(status, sessions.sessions);
-    renderSites(status);
-    renderAttention(status, sessions.sessions);
-    renderMap(geo);
-    renderLocations(status);
-    renderSessions(sessions.sessions, statements.statements);
-    renderFailures(status, sessions.sessions, statements.statements, events, adminData);
-    renderFreshness(fresh);
-    renderLog(events);
-    renderAdmin(adminData);
+    renderDirty();
   } catch (err) {
     $('error').hidden = false;
     $('error').textContent = `Could not load data: ${err.message}`;
   }
+}
+
+async function refresh() {
+  state.lastFull = Date.now();
+  for (const k of Object.keys(data)) dirty.add(k); // a full refresh redraws everything
+  await refreshParts(new Set(['status', 'sessions', 'how']));
+}
+
+// ---- Live updates ------------------------------------------------------------
+//
+// One stream per page (Server-Sent Events read with fetch, so the token goes
+// in a header). A change names what moved; the page refetches only that,
+// at most every 500 ms (5 s for staff, whose every query is audited). Each
+// pushed change is timed from GridWatch's receipt to the moment it is drawn,
+// and reported back, which is how the "tile < 2 s" target is measured.
+
+const throttle = { parts: new Set(), timer: null, last: 0 };
+function scheduleRefresh(parts) {
+  for (const p of parts) throttle.parts.add(p);
+  if (throttle.timer) return;
+  const gap = state.persona === 'platform_admin' ? 5000 : 500;
+  throttle.timer = setTimeout(async () => {
+    throttle.timer = null;
+    throttle.last = Date.now();
+    const todo = new Set(throttle.parts);
+    throttle.parts.clear();
+    const timed = state.pendingRenders.splice(0);
+    await refreshParts(todo);
+    // Two frames later the browser has painted what was just drawn.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        if (document.visibilityState !== 'visible') return;
+        const now = performance.now();
+        for (const t of timed) state.renderSamples.push(Math.round(t.ageAtSendMs + (now - t.arrivedAt)));
+      }),
+    );
+  }, Math.max(0, throttle.last + gap - Date.now()));
+}
+
+function onStreamEvent(event, payload) {
+  if (event === 'hello') {
+    const reconnect = state.live.everConnected;
+    state.live.connected = true;
+    state.live.everConnected = true;
+    state.live.retryMs = 1000;
+    state.live.onHello?.();
+    state.live.onHello = null;
+    renderUpdated();
+    if (reconnect) void refresh(); // anything could have changed while we were away
+  } else if (event === 'change') {
+    if (document.visibilityState === 'visible' && typeof payload.ageAtSendMs === 'number') {
+      state.pendingRenders.push({ arrivedAt: performance.now(), ageAtSendMs: payload.ageAtSendMs });
+    }
+    const parts = new Set();
+    for (const k of payload.kinds ?? []) {
+      if (['status', 'meter', 'fault', 'site'].includes(k)) parts.add('status');
+      if (['session', 'statement'].includes(k)) parts.add('sessions');
+    }
+    if (parts.size) scheduleRefresh(parts);
+  } else if (event === 'resync') {
+    scheduleRefresh(new Set(['status', 'sessions', 'how']));
+  } else if (event === 'expired') {
+    void switchPersona(state.persona); // log in again
+  }
+}
+
+async function connectStream() {
+  state.live.ctrl?.abort();
+  const ctrl = new AbortController();
+  state.live.ctrl = ctrl;
+  try {
+    const res = await fetch('/v1/stream', { headers: { authorization: `Bearer ${state.token}` }, signal: ctrl.signal });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      for (let i = buf.indexOf('\n\n'); i >= 0; i = buf.indexOf('\n\n')) {
+        const block = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const event = /^event: (.*)$/m.exec(block)?.[1];
+        const json = /^data: (.*)$/m.exec(block)?.[1];
+        if (event) onStreamEvent(event, json ? JSON.parse(json) : {});
+      }
+    }
+  } catch {
+    /* dropped or refused; retried below */
+  }
+  if (ctrl.signal.aborted || state.live.ctrl !== ctrl) return;
+  state.live.connected = false;
+  renderUpdated();
+  setTimeout(() => {
+    if (state.live.ctrl === ctrl) void connectStream();
+  }, state.live.retryMs);
+  state.live.retryMs = Math.min(30_000, state.live.retryMs * 2);
+}
+
+function postRenderSamples() {
+  if (!state.renderSamples.length || !state.token) return;
+  const samplesMs = state.renderSamples.splice(0, 100).filter((ms) => ms >= 0 && ms <= 600_000);
+  if (!samplesMs.length) return;
+  void fetch('/v1/freshness/render', {
+    method: 'POST',
+    keepalive: true,
+    headers: { authorization: `Bearer ${state.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ samplesMs }),
+  }).catch(() => {});
 }
 
 async function switchPersona(persona) {
@@ -1142,7 +1302,19 @@ async function switchPersona(persona) {
   state.point = { key: first, ...POINTS[first] };
   state.fitted = false;
   renderChrome();
+  state.live.ctrl?.abort();
+  state.live.connected = false;
+  state.live.everConnected = false;
+  state.pendingRenders = [];
   await login(persona);
+  // Subscribe first, then load: a change committed in between is then
+  // either in the snapshot or on the stream, never lost between them.
+  const subscribed = new Promise((resolve) => {
+    state.live.onHello = resolve;
+    setTimeout(resolve, 3000); // no stream: load anyway and fall back to polling
+  });
+  void connectStream();
+  await subscribed;
   await Promise.all([refresh(), loadNearest(), loadCoverage()]);
 }
 
@@ -1239,5 +1411,14 @@ if (!PERSONAS[state.persona]) state.persona = 'acme-charge';
 if (state.tab !== 'ops' && state.tab !== 'how') state.tab = 'ops';
 initMap();
 void switchPersona(state.persona);
-setInterval(() => void refresh(), 5000);
+// With the stream up: a full refresh every 30 s, for what time alone changes
+// (a site going quiet). Without it: every 5 s, as before.
+setInterval(() => {
+  if (!state.live.connected || Date.now() - (state.lastFull ?? 0) > 30_000) void refresh();
+}, 5000);
+// How it works: its evidence every 15 s while it is the open tab.
+setInterval(() => {
+  if (state.tab === 'how' && document.visibilityState === 'visible') void refreshParts(new Set(['how']));
+}, 15_000);
+setInterval(postRenderSamples, 10_000);
 setInterval(() => void loadCoverage(), 60000);

@@ -39,9 +39,10 @@ export async function verifyToken(secret: string, authorization: string | undefi
   }
   const role = payload.role;
   const subject = typeof payload.sub === 'string' ? payload.sub : 'unknown';
-  if (role === 'platform_admin') return { subject, role, operatorId: null };
+  const expiresAt = typeof payload.exp === 'number' ? payload.exp * 1000 : undefined;
+  if (role === 'platform_admin') return { subject, role, operatorId: null, expiresAt };
   if (role === 'operator' && typeof payload.operator_id === 'string' && payload.operator_id) {
-    return { subject, role, operatorId: payload.operator_id };
+    return { subject, role, operatorId: payload.operator_id, expiresAt };
   }
   throw new AuthError('token has no usable role / operator_id claim');
 }

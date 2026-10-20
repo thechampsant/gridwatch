@@ -36,6 +36,7 @@ export interface TenantContext {
   role: 'operator' | 'platform_admin';
   // null only for platform_admin
   operatorId: string | null;
+  expiresAt?: number; // token expiry (ms), for long-lived streams
 }
 
 // Every API query runs inside a transaction that pins the tenant for row-level

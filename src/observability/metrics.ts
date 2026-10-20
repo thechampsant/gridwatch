@@ -65,6 +65,27 @@ export const metrics = {
     help: 'Events first seen on a deep reconciliation poll (i.e. missed by the normal path)',
     registers: [registry],
   }),
+  // Push to dashboards, by stage (Part A §12): receipt -> committed is
+  // pipelineLatency above; receipt -> sent down the stream; receipt -> drawn
+  // on a screen, as the dashboard reports it.
+  pushAgeAtSend: new client.Histogram({
+    name: 'gridwatch_push_age_at_send_seconds',
+    help: 'Receipt at the GridWatch edge -> change sent to open dashboards',
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 5, 10],
+    registers: [registry],
+  }),
+  receiptToRender: new client.Histogram({
+    name: 'gridwatch_receipt_to_render_seconds',
+    help: 'Receipt at the GridWatch edge -> drawn on a dashboard screen (reported by the browser)',
+    labelNames: ['tenant'] as const,
+    buckets: [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10],
+    registers: [registry],
+  }),
+  pushStreams: new client.Gauge({
+    name: 'gridwatch_push_streams',
+    help: 'Dashboards currently connected to the change stream',
+    registers: [registry],
+  }),
   archived: new client.Counter({
     name: 'gridwatch_raw_archive_total',
     help: 'Raw payloads archived to object storage, by result',

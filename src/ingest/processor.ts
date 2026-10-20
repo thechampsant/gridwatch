@@ -1,3 +1,4 @@
+import { kindOfEvent, notifyChange, type ChangeKind } from '../db/changes.js';
 import type { Client, Pool } from '../db/pool.js';
 import { withTx } from '../db/pool.js';
 import { PollPage, WebhookBatch } from '../csms/schemas.js';
@@ -33,12 +34,20 @@ interface InboxRow {
   attempts: number;
 }
 
+// What one inbox row changed, per operator: pushed to open dashboards, and the
+// event types timed for the receipt -> committed latency.
+interface RowChanges {
+  byOperator: Map<string, { sites: Set<string>; kinds: Set<ChangeKind> }>;
+  appliedTypes: string[];
+}
+
 // Claims up to batchSize pending inbox rows and applies them. Each row runs in
 // its own savepoint: one bad payload never blocks the others, and a crash
 // part-way leaves the row pending (everything it did is rolled back), so it is
 // simply retried. Apply is idempotent, so a retry can't double-count.
 export async function processPending(pool: Pool, opts: ProcessorOptions = defaultProcessorOptions): Promise<number> {
-  return withTx(pool, async (c) => {
+  const done: { receivedAt: Date; types: string[] }[] = [];
+  const n = await withTx(pool, async (c) => {
     const { rows } = await c.query<InboxRow>(
       `SELECT inbox_id, connection_id, source, delivery_ref, site_id, server_time, received_at, payload, attempts
          FROM csms_inbox WHERE processed_at IS NULL
@@ -48,11 +57,17 @@ export async function processPending(pool: Pool, opts: ProcessorOptions = defaul
     for (const row of rows) {
       await c.query('SAVEPOINT inbox_row');
       try {
-        await processRow(c, row, opts);
-        await c.query(`UPDATE csms_inbox SET processed_at = now(), attempts = attempts + 1 WHERE inbox_id = $1`, [
+        const changes = await processRow(c, row, opts);
+        await c.query(`UPDATE csms_inbox SET processed_at = clock_timestamp(), attempts = attempts + 1 WHERE inbox_id = $1`, [
           row.inbox_id,
         ]);
+        // Inside the savepoint: a row that rolls back announces nothing.
+        // Re-reads and duplicates change nothing, so they announce nothing.
+        for (const [op, ch] of changes.byOperator) {
+          await notifyChange(c, { id: row.inbox_id, op, sites: [...ch.sites], kinds: [...ch.kinds], receivedAt: row.received_at.toISOString() });
+        }
         await c.query('RELEASE SAVEPOINT inbox_row');
+        done.push({ receivedAt: row.received_at, types: changes.appliedTypes });
       } catch (err) {
         await c.query('ROLLBACK TO SAVEPOINT inbox_row');
         const message = (err as Error).message;
@@ -75,9 +90,14 @@ export async function processPending(pool: Pool, opts: ProcessorOptions = defaul
     }
     return rows.length;
   });
+  // Observed after the commit, so the metric means what its name says.
+  const now = Date.now();
+  for (const r of done) for (const type of r.types) metrics.pipelineLatency.observe({ type }, Math.max(0, (now - r.receivedAt.getTime()) / 1000));
+  return n;
 }
 
-async function processRow(c: Client, row: InboxRow, opts: ProcessorOptions): Promise<void> {
+async function processRow(c: Client, row: InboxRow, opts: ProcessorOptions): Promise<RowChanges> {
+  const changes: RowChanges = { byOperator: new Map(), appliedTypes: [] };
   const envelope = row.source === 'poll' ? PollPage.safeParse(row.payload) : WebhookBatch.safeParse(row.payload);
   if (!envelope.success) {
     const detail = envelope.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ');
@@ -86,7 +106,7 @@ async function processRow(c: Client, row: InboxRow, opts: ProcessorOptions): Pro
       outcome: 'quarantined',
       reason: `Payload does not match the vendor contract (${detail}).`,
     });
-    return;
+    return changes;
   }
 
   const chargers = new Map<string, ChargerInfo | null>();
@@ -163,10 +183,15 @@ async function processRow(c: Client, row: InboxRow, opts: ProcessorOptions): Pro
     metrics.events.inc({ source: row.source, type, outcome: outcome.outcome });
     if (outcome.outcome === 'applied' || outcome.outcome === 'held') {
       metrics.sourceLag.observe({ source: row.source, type }, Math.max(0, secondsBetween(reference, ev.ts)));
-      metrics.pipelineLatency.observe({ type }, Math.max(0, secondsBetween(new Date(), row.received_at)));
+      changes.appliedTypes.push(type);
+      const op = changes.byOperator.get(charger.operatorId) ?? { sites: new Set<string>(), kinds: new Set<ChangeKind>() };
+      op.sites.add(charger.siteId);
+      op.kinds.add(kindOfEvent(type));
+      changes.byOperator.set(charger.operatorId, op);
       if (isReconciliation) metrics.reconciliationMissed.inc();
     }
   }
+  return changes;
 }
 
 function invalidSummary(p: PartialEvent): string {
@@ -270,7 +295,7 @@ async function recordOutcome(
 // forever: a stop with no start after the grace period, or a start with no
 // stop after a day.
 export async function sweepSessions(pool: Pool, graceSec: number): Promise<number> {
-  const r = await pool.query(
+  const r = await pool.query<{ operator_id: string; site_id: string }>(
     `UPDATE sessions
         SET billing_status = 'needs_review',
             review_reason = CASE billing_status WHEN 'awaiting_start' THEN 'start_missing' ELSE 'stop_missing' END,
@@ -279,9 +304,13 @@ export async function sweepSessions(pool: Pool, graceSec: number): Promise<numbe
               ELSE 'Start received but no stop within 24 hours.' END,
             updated_at = now()
       WHERE (billing_status = 'awaiting_start' AND first_seen_at < now() - make_interval(secs => $1))
-         OR (billing_status = 'open' AND first_seen_at < now() - interval '24 hours')`,
+         OR (billing_status = 'open' AND first_seen_at < now() - interval '24 hours')
+      RETURNING operator_id, site_id`,
     [graceSec],
   );
+  const byOp = new Map<string, Set<string>>();
+  for (const x of r.rows) byOp.set(x.operator_id, (byOp.get(x.operator_id) ?? new Set()).add(x.site_id));
+  for (const [op, sites] of byOp) await notifyChange(pool, { id: null, op, sites: [...sites], kinds: ['session'], receivedAt: null });
   return r.rowCount ?? 0;
 }
 

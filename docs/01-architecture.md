@@ -360,6 +360,7 @@ The slice implements steps 1, 2 and 4 with demo data. Three synthetic sites cann
 ### 7.3 Serving the map
 - **Static layer.** Site points and slowly changing attributes as **vector tiles** (MVT) from PostGIS (`ST_AsMVT` via Martin), with tenant-scoped URLs and short CDN TTLs. They are invalidated on catalogue change. Clustering at low zoom comes from tile aggregation.
 - **Live layer.** On load: a snapshot of status per site. Then **only deltas** over WebSocket, applied as MapLibre `feature-state` with no re-download.
+  - The slice builds the shape of this with less machinery: the processor sends `pg_notify` inside each committed row's savepoint (so a rolled-back row announces nothing), each API process holds one LISTEN connection, and dashboards hold one Server-Sent Events stream filtered to their operator. A change carries IDs only; the page re-reads through the API, so row-level security still decides what it sees. Kafka, Redis and a WebSocket gateway replace those three pieces at scale.
 - **Renderer.** MapLibre GL (WebGL) with a commercial or self-hosted OSM basemap. Tens of thousands of points render fine; DOM-marker libraries do not.
 - **Load.** About 12k sites and a few dozen status changes per second network-wide is small. The hard part is freshness, not volume.
 
@@ -516,7 +517,7 @@ You can't defend a freshness contract with CPU graphs. The service-level indicat
 | Vendor lag (webhook) | `receipt − event_ts`, corrected by a per-charger clock-skew estimate | Vendor |
 | Pipeline latency | Receipt → state committed (histogram) | GridWatch |
 | Push latency | Committed → WebSocket sent | GridWatch |
-| Render latency | Browser beacon: sent → rendered (clock offset from WebSocket ping) | GridWatch |
+| Render latency | Browser beacon: the server stamps each push with its age since receipt; the browser adds arrival → painted on its own monotonic clock, so no clock offset is needed | GridWatch |
 | Backlog age | Age of oldest unprocessed raw payload / consumer lag in seconds | GridWatch (leading indicator) |
 | Data age | Distribution of "time since vendor confirmed" across sites | Product, shown to users |
 
@@ -527,7 +528,7 @@ You can't defend a freshness contract with CPU graphs. The service-level indicat
 - **Multi-window burn-rate alerts** (5 m and 1 h at 14.4× for paging; 6 h and 3 d for tickets), backlog-age alerts, quarantine-rate spikes, "vendor feed degraded" per connection, and "settlement not ready past deadline".
 - **OpenTelemetry tracing** with context propagated through Kafka headers, and exemplars linking slow histogram buckets to traces.
 
-The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipeline_latency_seconds`, inbox backlog age, CSMS outcomes and quarantine counters, Prometheus recording rules and burn-rate alerts (`ops/prometheus/rules.yml`, unit-tested with `promtool` so an idle pipeline never pages), and `/v1/freshness`. A live simulator on the generated sites keeps traffic, faults and vendor errors flowing, so these signals move during a demo.
+The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipeline_latency_seconds` (observed after commit), `gridwatch_push_age_at_send_seconds`, `gridwatch_receipt_to_render_seconds` (from the dashboard's reports), inbox backlog age, CSMS outcomes and quarantine counters, Prometheus recording rules and burn-rate alerts (`ops/prometheus/rules.yml`, unit-tested with `promtool` so an idle pipeline never pages), and `/v1/freshness`. A live simulator on the generated sites keeps traffic, faults and vendor errors flowing, so these signals move during a demo.
 
 ---
 

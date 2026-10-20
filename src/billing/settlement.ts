@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { notifyChange } from '../db/changes.js';
 import type { Pool } from '../db/pool.js';
 import { withTx } from '../db/pool.js';
 
@@ -157,6 +158,7 @@ export async function runSettlement(
         checksum,
       ],
     );
+    await notifyChange(c, { id: null, op: operatorId, sites: [], kinds: ['statement'], receivedAt: null });
     return { status: 'created', statement };
   });
 }
