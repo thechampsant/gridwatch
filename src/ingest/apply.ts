@@ -1,4 +1,5 @@
 import type { Client } from '../db/pool.js';
+import { insertCharge } from '../billing/charge.js';
 import { evaluateSessionEnergy, type EnergyOptions, type Reading } from '../billing/energy.js';
 import { formatLocalTime, secondsBetween } from '../util/time.js';
 import type { NormalizedEvent } from './normalize.js';
@@ -192,7 +193,8 @@ interface SessionRow {
   stopped_at: Date | null;
   start_meter_wh: number | null;
   stop_meter_wh: number | null;
-  billing_status: 'open' | 'awaiting_start' | 'charged' | 'needs_review';
+  billing_status: 'open' | 'awaiting_start' | 'charged' | 'needs_review' | 'voided';
+  energy_method: string | null;
 }
 
 async function applySession(
@@ -210,7 +212,7 @@ async function applySession(
   // same session serialise here, so the merge is race-free.
   const s = (
     await c.query<SessionRow>(
-      `SELECT charger_id, connector_id, started_at, stopped_at, start_meter_wh, stop_meter_wh, billing_status
+      `SELECT charger_id, connector_id, started_at, stopped_at, start_meter_wh, stop_meter_wh, billing_status, energy_method
          FROM sessions WHERE connection_id = $1 AND session_id = $2 FOR UPDATE`,
       [charger.connectionId, ev.sessionId],
     )
@@ -269,6 +271,11 @@ async function applySession(
     s.start_meter_wh = s.start_meter_wh ?? ev.startMeterWh;
   }
 
+  // The operator already decided this session (billed a confirmed amount, or
+  // voided it). A late event still adds its facts, but never re-bills.
+  if (s.billing_status === 'voided' || s.energy_method === 'manual_review') {
+    return { outcome: 'applied', reason: 'Recorded. This session was resolved by operator review, so it is not re-billed.' };
+  }
   return finalizeSession(c, ev, ctx, s, mergedIntoStop);
 }
 
@@ -340,31 +347,8 @@ async function finalizeSession(
           WHERE connection_id = $1 AND session_id = $2`,
         [...key, verdict.energyWh, verdict.method],
       );
-      // Money is computed in NUMERIC, rounded half-up to the currency's minor
-      // unit. The tariff in force at session start applies. The business day
-      // is the stop's local date in the site's IANA zone.
-      const charged = await c.query(
-        `INSERT INTO charges (connection_id, session_id, operator_id, site_id, business_date, timezone, currency,
-                              energy_wh, tariff_id, price_per_kwh, session_fee, energy_amount, total_amount)
-         SELECT s.connection_id, s.session_id, s.operator_id, s.site_id,
-                (s.stopped_at AT TIME ZONE st.timezone)::date, st.timezone, t.currency,
-                s.energy_wh, t.tariff_id, t.price_per_kwh, t.session_fee,
-                round(s.energy_wh * t.price_per_kwh / 1000, 2),
-                round(s.energy_wh * t.price_per_kwh / 1000, 2) + t.session_fee
-           FROM sessions s
-           JOIN sites st ON st.site_id = s.site_id
-           JOIN LATERAL (
-             SELECT * FROM tariffs
-              WHERE operator_id = s.operator_id AND valid_from <= s.started_at
-                AND (valid_to IS NULL OR valid_to > s.started_at)
-              ORDER BY valid_from DESC LIMIT 1
-           ) t ON true
-          WHERE s.connection_id = $1 AND s.session_id = $2
-         ON CONFLICT (connection_id, session_id) DO NOTHING
-         RETURNING total_amount, currency`,
-        key,
-      );
-      if (charged.rowCount === 0) {
+      const charged = await insertCharge(c, [charger.connectionId, ev.sessionId], { allowStopBasis: false });
+      if (!charged) {
         const exists = await c.query(`SELECT 1 FROM charges WHERE connection_id = $1 AND session_id = $2`, key);
         if (exists.rowCount === 0) {
           const detail = 'No tariff in force at session start. Not invoiced.';

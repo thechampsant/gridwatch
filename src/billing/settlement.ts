@@ -29,6 +29,7 @@ export interface Statement {
   energyWh: number;
   totalAmount: string;
   heldCount: number;
+  voidedCount: number;
   checksum: string;
 }
 
@@ -91,6 +92,15 @@ export async function runSettlement(
         [operatorId, businessDate],
       )
     ).rows;
+    const voided = (
+      await c.query<{ session_id: string }>(
+        `SELECT se.session_id FROM sessions se JOIN sites st ON st.site_id = se.site_id
+          WHERE se.operator_id = $1 AND se.billing_status = 'voided'
+            AND (se.stopped_at AT TIME ZONE st.timezone)::date = $2
+          ORDER BY se.session_id`,
+        [operatorId, businessDate],
+      )
+    ).rows;
     const totals = (
       await c.query<{ n: number; energy: number; total: string }>(
         `SELECT count(*)::int AS n, coalesce(sum(energy_wh), 0)::bigint AS energy, coalesce(sum(total_amount), 0)::text AS total
@@ -99,8 +109,11 @@ export async function runSettlement(
       )
     ).rows[0]!;
 
+    // Voided sessions join the checksum only when there are any, so statements
+    // issued before reviews existed keep their checksum and aren't re-issued.
+    const ids = (rows: { session_id: string }[]) => rows.map((r) => r.session_id);
     const checksum = createHash('sha256')
-      .update(JSON.stringify({ lines, held: held.map((h) => h.session_id) }))
+      .update(JSON.stringify({ lines, held: ids(held), ...(voided.length ? { voided: ids(voided) } : {}) }))
       .digest('hex');
 
     const latest = (
@@ -121,14 +134,15 @@ export async function runSettlement(
       energyWh: totals.energy,
       totalAmount: totals.total,
       heldCount: held.length,
+      voidedCount: voided.length,
       checksum,
     };
     if (latest && latest.checksum === checksum) return { status: 'unchanged', statement };
 
     await c.query(
       `INSERT INTO settlement_statements (operator_id, business_date, version, currency, timezone, session_count,
-                                          energy_wh, total_amount, held_count, checksum)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                                          energy_wh, total_amount, held_count, voided_count, checksum)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         operatorId,
         businessDate,
@@ -139,6 +153,7 @@ export async function runSettlement(
         statement.energyWh,
         statement.totalAmount,
         statement.heldCount,
+        statement.voidedCount,
         checksum,
       ],
     );

@@ -75,6 +75,11 @@ export function evaluateSessionEnergy(f: SessionFacts, readings: Reading[], opts
   return { kind: 'billable', energyWh: delta, method: 'register_delta', note: `Settled once: ${fmtKwh(delta)}.` };
 }
 
+// The most a charger can physically deliver in a session, with headroom.
+export function maxPlausibleWh(maxKw: number, durationMs: number, tolerance: number): number {
+  return maxKw * 1000 * (durationMs / 3_600_000) * tolerance;
+}
+
 function plausibility(f: SessionFacts, energyWh: number, tolerance: number): EnergyVerdict | null {
   if (f.startedAt === null || f.stoppedAt === null) return null;
   const durationMs = f.stoppedAt.getTime() - f.startedAt.getTime();
@@ -86,7 +91,7 @@ function plausibility(f: SessionFacts, energyWh: number, tolerance: number): Ene
     };
   }
   const hours = durationMs / 3_600_000;
-  const maxWh = f.maxKw * 1000 * hours * tolerance;
+  const maxWh = maxPlausibleWh(f.maxKw, durationMs, tolerance);
   if (energyWh > maxWh) {
     const avgKw = energyWh / 1000 / hours;
     return {

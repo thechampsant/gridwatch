@@ -1,7 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import { z } from 'zod';
 import type { SecretProvider } from '../archive/aws.js';
+import { ReviewError, reviewSession, type ReviewDecision } from '../billing/review.js';
+import { runSettlement } from '../billing/settlement.js';
 import { parseAsOf, type Clock } from '../clock.js';
 import { withTenant, withTx, type Client, type Pool, type TenantContext } from '../db/pool.js';
 import { CoverageError, coverageGaps, densityResError, hexDensity } from '../geo/coverage.js';
@@ -22,7 +25,14 @@ export interface ApiDeps {
   staleAfterSec: number;
   publicDir?: string;
   logger?: boolean;
+  billing?: { tolerance: number; graceSec: number }; // defaults: 1.1 and 2 h, as in config
 }
+
+const ReviewBody = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('bill'), energyKwh: z.number().positive().max(1000), note: z.string().trim().min(5).max(500) }),
+  z.object({ action: z.literal('void'), note: z.string().trim().min(5).max(500) }),
+]);
+const SESSION_STATUSES = new Set(['open', 'awaiting_start', 'charged', 'needs_review', 'voided']);
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -270,27 +280,89 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
   });
 
-  app.get('/v1/sessions', async (req) => {
+  // ?status=needs_review is the review queue, so it can't be pushed out of
+  // the newest-200 window by a busy network.
+  app.get('/v1/sessions', async (req, reply) => {
     const q = req.query as Record<string, string | undefined>;
     const date = q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date) ? q.date : null;
+    const status = q.status ?? null;
+    if (status !== null && !SESSION_STATUSES.has(status)) return reply.code(400).send({ error: `status must be one of ${[...SESSION_STATUSES].join(', ')}` });
+    const includeSynthetic = q.include_synthetic !== 'false';
+    const tolerance = deps.billing?.tolerance ?? 1.1;
     const rows = await run(req, (c) =>
       c.query(
-        `SELECT se.session_id, se.operator_id, se.site_id, st.name AS site_name, st.timezone, se.charger_id, se.connector_id,
+        `SELECT se.connection_id, se.session_id, se.operator_id, se.site_id, st.name AS site_name, st.timezone, st.synthetic,
+                se.charger_id, se.connector_id, cg.max_kw::float8 AS max_kw,
                 se.started_at, se.stopped_at, se.start_meter_wh, se.stop_meter_wh, se.energy_wh, se.energy_method,
                 se.billing_status, se.review_reason, se.review_detail,
+                CASE WHEN se.started_at IS NOT NULL AND se.stopped_at > se.started_at
+                     THEN floor(cg.max_kw * 1000 * extract(epoch FROM se.stopped_at - se.started_at) / 3600 * $4)::bigint END AS plausible_max_wh,
                 ch.business_date::text AS business_date, ch.currency, ch.price_per_kwh::text AS price_per_kwh,
                 ch.session_fee::text AS session_fee, ch.energy_amount::text AS energy_amount,
-                ch.total_amount::text AS total_amount, ch.tariff_id
+                ch.total_amount::text AS total_amount, ch.tariff_id,
+                rv.action AS review_action, rv.note AS review_note, rv.reviewed_by, rv.reviewed_at, rv.tariff_basis
            FROM sessions se
            JOIN sites st ON st.site_id = se.site_id
+           JOIN chargers cg ON cg.charger_id = se.charger_id
            LEFT JOIN charges ch ON ch.connection_id = se.connection_id AND ch.session_id = se.session_id
-          WHERE $1::date IS NULL OR ch.business_date = $1::date OR (se.stopped_at AT TIME ZONE st.timezone)::date = $1::date
+           LEFT JOIN LATERAL (
+             SELECT action, note, reviewed_by, reviewed_at, tariff_basis FROM session_reviews r
+              WHERE r.connection_id = se.connection_id AND r.session_id = se.session_id
+              ORDER BY review_id DESC LIMIT 1
+           ) rv ON true
+          WHERE ($1::date IS NULL OR ch.business_date = $1::date OR (se.stopped_at AT TIME ZONE st.timezone)::date = $1::date)
+            AND ($2::text IS NULL OR se.billing_status = $2)
+            AND ($3 OR NOT st.synthetic)
           ORDER BY coalesce(se.stopped_at, se.started_at) DESC NULLS LAST
           LIMIT 200`,
-        [date],
+        [date, status, includeSynthetic, tolerance],
       ),
     );
-    return { date, sessions: rows.rows };
+    return { date, status, sessions: rows.rows };
+  });
+
+  // The exceptions queue: the operator that owns a held session bills a
+  // confirmed amount or voids it. If that day was already settled, the
+  // statement is re-issued as a new version straight away.
+  app.post<{ Params: { connectionId: string; sessionId: string } }>('/v1/sessions/:connectionId/:sessionId/review', async (req, reply) => {
+    if (req.tenant!.role !== 'operator') return reply.code(403).send({ error: 'only the operator that owns a session can review it' });
+    const parsed = ReviewBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'send {action: "bill", energyKwh, note} or {action: "void", note}; the note (5-500 characters) says what was checked' });
+    }
+    const b = parsed.data;
+    const decision: ReviewDecision = b.action === 'bill' ? { action: 'bill', energyWh: Math.round(b.energyKwh * 1000), note: b.note } : { action: 'void', note: b.note };
+    const key: [string, string] = [req.params.connectionId, req.params.sessionId];
+    let result;
+    try {
+      result = await withTenant(deps.apiPool, req.tenant!, (c) => reviewSession(c, key, decision, req.tenant!, deps.billing?.tolerance ?? 1.1));
+    } catch (err) {
+      if (err instanceof ReviewError) return reply.code(err.status).send({ error: err.message });
+      throw err;
+    }
+
+    // The review is committed and stands on its own; re-issuing is reported
+    // separately, so a settlement problem never undoes the operator's decision.
+    let statement: Record<string, unknown> = { status: 'not_settled_yet' };
+    if (result.businessDate) {
+      const settled = await deps.ingestPool.query(`SELECT 1 FROM settlement_statements WHERE operator_id = $1 AND business_date = $2 LIMIT 1`, [
+        result.operatorId,
+        result.businessDate,
+      ]);
+      if (settled.rowCount) {
+        try {
+          const r = await runSettlement(deps.ingestPool, result.operatorId, result.businessDate, {
+            now: deps.clock.now(),
+            graceSec: deps.billing?.graceSec ?? 7200,
+          });
+          statement = r.status === 'not_ready' ? { status: r.status, reason: r.reason } : { status: r.status, version: r.statement.version, businessDate: result.businessDate };
+        } catch (err) {
+          req.log.error(err);
+          statement = { status: 'error', reason: (err as Error).message };
+        }
+      }
+    }
+    return { sessionId: key[1], billingStatus: result.billingStatus, review: result.review, statement };
   });
 
   app.get('/v1/settlement/statements', async (req) => {
@@ -300,7 +372,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       c.query(
         `SELECT DISTINCT ON (operator_id, business_date)
                 operator_id, business_date::text AS business_date, version, currency, timezone, session_count,
-                energy_wh, total_amount::text AS total_amount, held_count, checksum, generated_at
+                energy_wh, total_amount::text AS total_amount, held_count, voided_count, checksum, generated_at
            FROM settlement_statements
           WHERE $1::date IS NULL OR business_date = $1::date
           ORDER BY operator_id, business_date DESC, version DESC`,

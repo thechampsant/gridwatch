@@ -15,6 +15,7 @@ const app = await buildServer({
   demoMode: config.demoMode(),
   demoNow: config.demoNow(),
   staleAfterSec: config.staleAfterSec(),
+  billing: { tolerance: config.plausibilityTolerance(), graceSec: Number(process.env.SETTLEMENT_GRACE_SEC ?? 7200) },
   publicDir: path.resolve('public'),
   logger: true,
 });

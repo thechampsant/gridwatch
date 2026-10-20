@@ -37,7 +37,7 @@ export const processorOptions: ProcessorOptions = {
 };
 
 const DATA_TABLES = [
-  'audit_log', 'settlement_statements', 'charges', 'sessions', 'fault_events', 'status_events', 'meter_readings',
+  'audit_log', 'settlement_statements', 'session_reviews', 'charges', 'sessions', 'fault_events', 'status_events', 'meter_readings',
   'connector_state', 'ingest_outcomes', 'csms_calls', 'poll_state', 'quarantine', 'csms_inbox', 'tariffs',
   'connectors', 'chargers', 'geocode_cache', 'geocode_overrides', 'sites', 'csms_connections', 'operators',
 ];

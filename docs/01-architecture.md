@@ -553,6 +553,10 @@ The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipe
   - Identical inputs → the same version, by checksum.
   - Late data → version n+1, keeping the old one for reconciliation.
 - **Exceptions queue.** Held sessions (meter reset, implausible energy, start or stop missing, no tariff) with a reason and detail, for CPO review.
+  - Built in the slice: the operator bills an amount it has confirmed, or voids the session, with a note (`POST /v1/sessions/:connectionId/:sessionId/review`). A billed amount must still fit the charger's physical limit. A session with no start is priced at the tariff in force at its stop, and the review records that.
+  - Decisions are append-only (`session_reviews`) and audited. If the day was settled, its statement is re-issued as the next version, so v1 stays as it was.
+  - Row-level security covers the writes too: the API role may update only the review columns, and only on its own operator's rows. GridWatch staff can see the queue but not decide.
+  - A late event never re-bills a reviewed session; its facts are still recorded.
 - **If GridWatch becomes the legal invoice (A8):** add invoice numbering, tax, legal retention (8–10 years in Germany, about 6 in India), and, for German driver billing, calibration-law-compliant signed meter values. That is a different product scope, which is why it's a question.
 
 ---

@@ -157,6 +157,8 @@ const state = {
   coverage: null, // /v1/coverage: hexagons, areas, countries
   gaps: null, // /v1/coverage/gaps
   layers: { density: readPref('gw.layer.density', 'false') === 'true', gaps: readPref('gw.layer.gaps', 'false') === 'true' },
+  reviewing: null, // draft decision on a held session; kept here so the 5 s refresh can't wipe it
+  reviewMessage: null,
   gapKm: [2, 5, 10].includes(Number(readPref('gw.gapkm', '5'))) ? Number(readPref('gw.gapkm', '5')) : 5,
 };
 
@@ -858,7 +860,20 @@ async function loadNearest() {
   }
 }
 
+const sessionKey = (s) => `${s.connection_id}|${s.session_id}`;
+function mergeSessions(...lists) {
+  const byKey = new Map();
+  for (const s of lists.flat()) if (!byKey.has(sessionKey(s))) byKey.set(sessionKey(s), s);
+  const when = (s) => new Date(s.stopped_at ?? s.started_at ?? 0).getTime();
+  return [...byKey.values()].sort((a, b) => when(b) - when(a));
+}
+
 function sessionReason(s) {
+  if (s.billing_status === 'voided') return `Not billed: voided by the operator. "${s.review_note ?? ''}"`;
+  if (s.billing_status === 'charged' && s.energy_method === 'manual_review') {
+    const basis = s.tariff_basis === 'session_stop' ? ' Priced at the tariff in force at the stop (no start time).' : '';
+    return `Billed after review. "${s.review_note ?? ''}"${basis}`;
+  }
   if (s.billing_status === 'charged') {
     return `Billed at ${fmtMoney(s.price_per_kwh, s.currency)} per kWh + ${fmtMoney(s.session_fee, s.currency)} session fee`;
   }
@@ -877,13 +892,16 @@ function renderSessions(sessions, statements) {
     ? statements
         .map((s) => {
           const op = PERSONAS[s.operator_id]?.title ?? s.operator_id;
-          return `<div class="statement"><div class="k">Daily statement · ${esc(fmtDay(s.business_date))}${state.persona === 'platform_admin' ? ` · ${esc(op)}` : ''}</div><div><b>${esc(fmtMoney(s.total_amount, s.currency))}</b> billed for ${esc(s.session_count)} session${s.session_count === 1 ? '' : 's'} (${fmtNum(Number(s.energy_wh) / 1000, 1)} kWh) · ${esc(s.held_count)} held for review</div></div>`;
+          const version = s.version > 1 ? ` · version ${esc(s.version)}, re-issued` : '';
+          const voided = s.voided_count ? ` · ${esc(s.voided_count)} voided` : '';
+          return `<div class="statement"><div class="k">Daily statement · ${esc(fmtDay(s.business_date))}${state.persona === 'platform_admin' ? ` · ${esc(op)}` : ''}${version}</div><div><b>${esc(fmtMoney(s.total_amount, s.currency))}</b> billed for ${esc(s.session_count)} session${s.session_count === 1 ? '' : 's'} (${fmtNum(Number(s.energy_wh) / 1000, 1)} kWh) · ${esc(s.held_count)} held for review${voided}</div></div>`;
         })
         .join('')
     : `<div class="small muted">No daily statement yet. It is issued once every site has reported past local midnight (or run: docker compose exec api node dist/bin/settle.js --date 2026-06-09).</div>`;
   const TONE = {
     charged: { label: 'Billed', fg: '#176B5B', bg: '#E1F2EE' },
     needs_review: { label: 'Held for review', fg: '#7A4A00', bg: '#FCF0DC' },
+    voided: { label: 'Voided', fg: '#5A616B', bg: '#ECEEF1' },
     awaiting_start: { label: 'Waiting', fg: '#5A616B', bg: '#ECEEF1' },
     open: { label: 'In progress', fg: '#5B33B3', bg: '#EEE8FA' },
   };
@@ -903,11 +921,102 @@ function renderSessions(sessions, statements) {
             : '–';
         const reported = s.start_meter_wh !== null && s.stop_meter_wh !== null && s.stop_meter_wh >= s.start_meter_wh ? (s.stop_meter_wh - s.start_meter_wh) / 1000 : null;
         const energy = s.energy_wh !== null ? `${fmtNum(Number(s.energy_wh) / 1000, 2)} kWh` : reported !== null ? `${fmtNum(reported, 2)} kWh reported` : '–';
-        const amount = s.total_amount ? fmtMoney(s.total_amount, s.currency) : 'Not billed yet';
-        return `<tr><td><b>${esc(s.site_name)}</b></td><td>${esc(chargerName(s.charger_id))}, connector ${esc(s.connector_id)}</td><td>${esc(when)}</td><td>${esc(energy)}</td><td>${esc(amount)}</td><td>${pill(t.label, t.fg, t.bg)}<div class="small" style="color:var(--ink-2);margin-top:4px">${esc(sessionReason(s))}</div></td></tr>`;
+        const amount = s.total_amount ? fmtMoney(s.total_amount, s.currency) : s.billing_status === 'voided' ? 'Not billed' : 'Not billed yet';
+        // Only the operator that owns the session decides; GridWatch staff see the queue but can't act on it.
+        const canReview = s.billing_status === 'needs_review' && state.persona !== 'platform_admin';
+        const button = canReview
+          ? `<button type="button" class="pin-btn" data-review="${esc(sessionKey(s))}" aria-pressed="${state.reviewing?.key === sessionKey(s)}">Review</button>`
+          : '';
+        return `<tr><td><b>${esc(s.site_name)}</b></td><td>${esc(chargerName(s.charger_id))}, connector ${esc(s.connector_id)}</td><td>${esc(when)}</td><td>${esc(energy)}</td><td>${esc(amount)}</td><td>${pill(t.label, t.fg, t.bg)}<div class="small" style="color:var(--ink-2);margin-top:4px">${esc(sessionReason(s))}</div>${button}</td></tr>`;
       })
       .join('') +
     '</tbody>';
+}
+
+// The exceptions queue: the operator bills an amount it has confirmed, or voids
+// the session. Drawn only when the draft changes, never by the refresh loop.
+function openReview(s) {
+  const reported = s.start_meter_wh !== null && s.stop_meter_wh !== null && s.stop_meter_wh >= s.start_meter_wh ? (s.stop_meter_wh - s.start_meter_wh) / 1000 : null;
+  const limit = s.plausible_max_wh !== null ? Number(s.plausible_max_wh) / 1000 : null;
+  const suggested = reported !== null && (limit === null || reported <= limit) ? reported.toFixed(3) : '';
+  state.reviewing = { key: sessionKey(s), s, action: s.stopped_at ? 'bill' : 'void', kwh: suggested, note: '', error: null, saving: false };
+  state.reviewMessage = null;
+  renderReviewPanel();
+  $('review-panel').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function renderReviewPanel() {
+  const panel = $('review-panel');
+  $('review-msg').hidden = !state.reviewMessage;
+  $('review-msg').textContent = state.reviewMessage ?? '';
+  const r = state.reviewing;
+  if (!r) {
+    panel.hidden = true;
+    panel.innerHTML = '';
+    return;
+  }
+  const s = r.s;
+  const kwh = (wh) => (wh === null || wh === undefined ? '–' : `${fmtNum(Number(wh) / 1000, 3)} kWh`);
+  const reported = s.start_meter_wh !== null && s.stop_meter_wh !== null ? Number(s.stop_meter_wh) - Number(s.start_meter_wh) : null;
+  const facts = [
+    ['Why it was held', REVIEW[s.review_reason] ?? s.review_reason ?? 'Needs a manual check'],
+    ['Charger', `${chargerName(s.charger_id)}, connector ${s.connector_id} · ${fmtNum(s.max_kw)} kW`],
+    ['Start', s.started_at ? fmtTime(s.started_at, s.timezone) : 'never arrived'],
+    ['End', s.stopped_at ? fmtTime(s.stopped_at, s.timezone) : 'not yet'],
+    ['Meter at start → end', `${s.start_meter_wh ?? '–'} → ${s.stop_meter_wh ?? '–'} Wh`],
+    ['Reported energy', reported === null ? '–' : reported < 0 ? 'negative (the meter went backwards)' : kwh(reported)],
+    ['Most this charger can deliver', s.plausible_max_wh === null ? 'unknown (no duration)' : kwh(s.plausible_max_wh)],
+  ];
+  const canBill = !!s.stopped_at;
+  panel.hidden = false;
+  panel.innerHTML = `<h3>Review: ${esc(s.site_name)} · ${esc(s.session_id)}</h3>
+    <div class="small muted">${esc(s.review_detail ?? '')}</div>
+    <div class="review-facts">${facts.map(([k, v]) => `<div><div class="k">${esc(k)}</div>${esc(v)}</div>`).join('')}</div>
+    <div class="review-choice" role="radiogroup" aria-label="Decision">
+      <label><input type="radio" name="review-action" value="bill" ${r.action === 'bill' ? 'checked' : ''} ${canBill ? '' : 'disabled'}> Bill
+        <input type="number" id="review-kwh" min="0.001" step="0.001" value="${esc(r.kwh)}" aria-label="Energy to bill in kWh" ${canBill ? '' : 'disabled'}> kWh that you have confirmed</label>
+      <label><input type="radio" name="review-action" value="void" ${r.action === 'void' ? 'checked' : ''}> Don't bill it (void)</label>
+    </div>
+    <label class="small" for="review-note">What did you check? This is kept with the decision.</label>
+    <textarea id="review-note" maxlength="500" placeholder="For example: charger log shows 7.4 kWh delivered">${esc(r.note)}</textarea>
+    ${r.error ? `<div class="error-text">${esc(r.error)}</div>` : ''}
+    <div class="review-actions">
+      <button type="button" class="btn-primary" data-review-save ${r.saving ? 'disabled' : ''}>${r.saving ? 'Saving…' : 'Save decision'}</button>
+      <button type="button" class="link-btn" data-review-cancel>Cancel</button>
+      <span class="small muted">If the day was already settled, its statement is re-issued as a new version.</span>
+    </div>`;
+}
+
+async function saveReview() {
+  const r = state.reviewing;
+  if (!r || r.saving) return;
+  const body = r.action === 'bill' ? { action: 'bill', energyKwh: Number(r.kwh), note: r.note.trim() } : { action: 'void', note: r.note.trim() };
+  if (r.action === 'bill' && !(Number(r.kwh) > 0)) r.error = 'Enter the energy to bill, in kWh.';
+  else if (r.note.trim().length < 5) r.error = 'Add a short note on what you checked (at least 5 characters).';
+  else r.error = null;
+  if (r.error) return renderReviewPanel();
+  r.saving = true;
+  renderReviewPanel();
+  try {
+    const [conn, sess] = r.key.split('|');
+    const res = await apiPost(`/v1/sessions/${encodeURIComponent(conn)}/${encodeURIComponent(sess)}/review`, body);
+    const st = res.statement ?? {};
+    const tail =
+      st.status === 'created'
+        ? ` The statement for ${fmtDay(st.businessDate)} was re-issued as version ${st.version}.`
+        : st.status === 'not_settled_yet'
+          ? ' It will be included when the day is settled.'
+          : st.status === 'not_ready'
+            ? ' The day is not ready to settle yet, so the statement will follow.'
+            : '';
+    state.reviewMessage = `Saved: ${sess} is ${res.billingStatus === 'voided' ? 'voided' : 'billed'}.${tail}`;
+    state.reviewing = null;
+  } catch (err) {
+    r.saving = false;
+    r.error = `Not saved: ${err.message}`;
+  }
+  renderReviewPanel();
+  void refresh();
 }
 
 // ---- How it works tab (technical evidence) --------------------------------
@@ -979,20 +1088,24 @@ function renderAdmin(adminData) {
 
 async function refresh() {
   try {
-    const [status, geo, sessions, statements, events, fresh] = await Promise.all([
+    const [status, geo, recent, statements, events, fresh, heldQueue] = await Promise.all([
       api('/v1/sites/status'),
       api('/v1/map/sites'),
-      api('/v1/sessions'),
-      api('/v1/settlement/statements'),
+      api(`/v1/sessions?include_synthetic=${state.showSynthetic}`),
+      api(`/v1/settlement/statements`),
       api('/v1/ingestion/events'),
       api('/v1/freshness'),
+      // The review queue on its own, so a busy network can't push it out of the newest 200.
+      api(`/v1/sessions?status=needs_review&include_synthetic=${state.showSynthetic}`),
     ]);
+    const sessions = { sessions: mergeSessions(heldQueue.sessions, recent.sessions) };
     // Vendor calls and set-aside records are admin-only; operators get 403, so don't ask.
     const adminData =
       state.persona === 'platform_admin'
         ? await Promise.all([api('/v1/admin/csms-calls'), api('/v1/admin/quarantine')]).then(([c, q]) => ({ calls: c.calls, quarantine: q.quarantine }))
         : null;
     state.lastStatus = status;
+    state.lastSessions = sessions.sessions;
     $('error').hidden = true;
     $('updated').textContent = `Updated ${new Date(status.asOf).toLocaleTimeString()} · refreshes every 5 s`;
     renderHealth(fresh);
@@ -1015,6 +1128,9 @@ async function refresh() {
 async function switchPersona(persona) {
   state.persona = persona;
   writePref('gw.persona', persona);
+  state.reviewing = null;
+  state.reviewMessage = null;
+  renderReviewPanel();
   const first = PERSONAS[persona].points[0];
   state.point = { key: first, ...POINTS[first] };
   state.fitted = false;
@@ -1052,6 +1168,18 @@ document.addEventListener('click', (e) => {
     if (state.lastStatus) renderLocations(state.lastStatus);
     return;
   }
+  if (el('[data-review]')) {
+    const key = el('[data-review]').dataset.review;
+    const s = state.lastSessions?.find((x) => sessionKey(x) === key);
+    if (s) openReview(s);
+    return;
+  }
+  if (el('[data-review-save]')) return void saveReview();
+  if (el('[data-review-cancel]')) {
+    state.reviewing = null;
+    renderReviewPanel();
+    return;
+  }
   if (el('[data-site]')) highlightSite(el('[data-site]').dataset.site);
   if (el('[data-target]')) $(el('[data-target]').dataset.target)?.scrollIntoView({ behavior: 'smooth' });
 });
@@ -1082,6 +1210,17 @@ for (const [key, id] of [
     applyCoverageLayers();
   });
 }
+// The review draft lives in state; typing never triggers a re-render.
+document.addEventListener('input', (e) => {
+  const r = state.reviewing;
+  if (!r) return;
+  if (e.target.id === 'review-kwh') r.kwh = e.target.value;
+  if (e.target.id === 'review-note') r.note = e.target.value;
+  if (e.target.name === 'review-action') r.action = e.target.value;
+});
+document.addEventListener('change', (e) => {
+  if (state.reviewing && e.target.name === 'review-action') state.reviewing.action = e.target.value;
+});
 $('gap-km').value = String(state.gapKm);
 $('gap-km').addEventListener('change', (e) => {
   state.gapKm = Number(e.target.value);
