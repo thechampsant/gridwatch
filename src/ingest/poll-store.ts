@@ -115,7 +115,9 @@ export class PgPollStore implements PollStore {
          last_contact_at = GREATEST(last_contact_at, $3),
          saved_cursor = NULL, saved_since = NULL,
          consecutive_failures = 0, last_outcome = 'ok', next_poll_at = $4,
-         last_reconciled_at = CASE WHEN $5 THEN now() ELSE last_reconciled_at END,
+         -- The first completed cycle (initial lookback) counts as the baseline
+         -- reconciliation; deep reconciliation then runs every reconcileEverySec.
+         last_reconciled_at = CASE WHEN $5 OR last_reconciled_at IS NULL THEN now() ELSE last_reconciled_at END,
          lease_owner = NULL, lease_until = NULL
        WHERE site_id = $1`,
       [siteId, hwm, contactAt, nextPollAt, reconciled],
