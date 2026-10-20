@@ -256,21 +256,18 @@ sequenceDiagram
 At-least-once, unordered delivery with no event IDs. Each event is judged on its own, so one bad event never sinks its batch.
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 32}}}%%
 flowchart TD
   IN["Inbox row: poll page or webhook batch"] --> ENV{"Envelope matches<br/>the vendor contract?"}
-  ENV -- no --> QE["Set the payload aside (quarantine)"]
-  ENV -- yes --> EV["Take each event in turn"]
-  EV --> VAL{"Valid event?<br/>fields, timestamp with offset"}
-  VAL -- no --> QV["Set this event aside;<br/>the rest still apply"]
-  VAL -- yes --> CAT{"Charger known, on this<br/>connection and site?"}
-  CAT -- no --> QC["Set aside: unknown charger<br/>or another operator's feed"]
-  CAT -- yes --> DUP{"Seen before?<br/>natural key"}
+  ENV -- no --> Q["Set aside (quarantine) with the reason;<br/>the rest of the batch still applies"]
+  ENV -- "yes, then each event" --> VAL{"Event valid, charger known,<br/>on this feed and site?"}
+  VAL -- no --> Q
+  VAL -- yes --> DUP{"Seen before?<br/>natural key"}
   DUP -- yes --> DU["Duplicate: ignored,<br/>never counted or billed twice"]
   DUP -- no --> NEW{"Newer than the current<br/>state, by event time?"}
   NEW -- no --> ST["Stale: kept in history,<br/>live state unchanged"]
   NEW -- yes --> AP["Applied"]
-  AP --> SES{"Completes a session?"}
-  SES -- yes --> PL{"Energy plausible?<br/>meter reset rebuilt from readings"}
+  AP -- "completes a session" --> PL{"Energy plausible?<br/>meter reset rebuilt from readings"}
   PL -- yes --> CH["Charge, unique per session"]
   PL -- no --> HOLD["Held for review, not billed"]
 ```
@@ -316,8 +313,9 @@ flowchart LR
 Each operator is settled on its own local day, and only once the data for that day is in.
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 32}}}%%
 flowchart TD
-  T["Settle operator X for local day D"] --> L{"Day D over in X's time zone,<br/>plus a 2 h grace period?"}
+  T["Settle operator X for local day D"] --> L{"Day D over in X's time<br/>zone, plus 2 h grace?"}
   L -- no --> NR["Not ready"]
   L -- yes --> W{"Every site's poll high-water<br/>mark past local midnight?"}
   W -- no --> NR
