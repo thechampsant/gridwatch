@@ -158,6 +158,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const lng = Number(q.lng);
     const limit = Math.min(Math.max(Number(q.limit ?? 1) || 1, 1), 20);
     const maxKm = Math.min(Math.max(Number(q.max_km ?? 50) || 50, 0.1), 2000);
+    const includeSynthetic = q.include_synthetic !== 'false';
     if (q.lat === undefined || q.lng === undefined || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
       return reply.code(400).send({ error: 'lat and lng are required decimal degrees' });
     }
@@ -173,10 +174,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         await c.query<{ site_id: string; dist_m: number }>(
           `SELECT s.site_id, ST_Distance(s.location, q.p)::float8 AS dist_m
              FROM sites s, (SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS p) q
-            WHERE s.location IS NOT NULL
+            WHERE s.location IS NOT NULL AND ($3 OR NOT s.synthetic)
             ORDER BY s.location <-> q.p
             LIMIT 500`,
-          [lng, lat],
+          [lng, lat, includeSynthetic],
         )
       ).rows;
       const views = new Map((await loadSiteViews(c, at, deps.staleAfterSec, ranked.map((r) => r.site_id))).map((v) => [v.siteId, v]));

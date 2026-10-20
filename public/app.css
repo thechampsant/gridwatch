@@ -104,6 +104,44 @@ table.log td.mono { font-size: 12px; white-space: nowrap; }
 .call .req { flex: 2 1 380px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; word-break: break-all; }
 .call .how { flex: 3 1 360px; font-size: 13px; color: var(--ink-2); }
 footer { padding: 12px 4px 24px; border-top: 1px solid var(--line); }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.tabs button { min-height: 44px; padding: 8px 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--muted); font-weight: 600; cursor: pointer; }
+.tabs button[aria-selected='true'] { color: var(--ink); border-bottom-color: var(--blue); }
+.tabs button:focus-visible, .att:focus-visible, .health:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.tab-body { display: flex; flex-direction: column; gap: 20px; }
+.tab-body[hidden] { display: none; }
+.tab-body > .card { flex: 0 0 auto; }
+
+/* Data-health chip in the page header */
+.health { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--ink-2); font-size: 13px; cursor: pointer; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: #2f9e6e; }
+
+/* Needs attention */
+.attention-card { flex: 1 1 320px; }
+.attention { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.attention li + li { border-top: 1px solid var(--line-2); }
+.att { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 44px; padding: 10px 2px; border: 0; background: transparent; color: var(--ink); text-align: left; cursor: pointer; font-size: 14px; }
+.att:hover { background: var(--soft); }
+.att .dot { flex: none; margin-top: 6px; }
+
+/* Sites and finder */
+.sites-card { flex: 2 1 480px; max-height: 720px; overflow: auto; }
+.finder-card { flex: 1 1 320px; }
+.site-meta { color: var(--ink-2); padding-top: 4px; }
+.site-meta .site-id { white-space: nowrap; margin-left: 4px; }
+.site.highlight { box-shadow: 0 0 0 2px var(--blue); }
+
+/* Sessions table */
+table.sessions { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 13px; }
+table.sessions th { text-align: left; background: var(--soft); font-size: 11px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 12px; }
+table.sessions td { padding: 10px 12px; border-top: 1px solid var(--line-2); vertical-align: top; }
+
+/* How it works */
+.steps { margin: 0; padding-left: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 24px; }
+.steps li { color: var(--ink-2); }
+.steps b { color: var(--ink); display: block; }
 .maplibregl-popup-content { font: 13px/1.4 'IBM Plex Sans', system-ui, sans-serif; }
 @media (max-width: 640px) {
   .wrap { padding: 16px; }

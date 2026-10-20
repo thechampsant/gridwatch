@@ -25,7 +25,7 @@ The fake vendor plays the stub scenario in about a minute. Then:
 
 | Open | For |
 |---|---|
-| http://localhost:8080/dashboard | The operations dashboard (your canvas design, on live data). Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
+| http://localhost:8080/dashboard | The dashboard on live data. **Operations** is the control room's view in plain language: free connectors, live charging, sites needing attention, the network map, a free-charger finder, and sessions with billing. **How it works** shows the evidence: data delay split into the vendor's share and ours, the per-event ingestion log, and (as GridWatch admin) vendor calls and set-aside records. Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
 | `./scripts/demo.sh` | A terminal walkthrough: ingestion log, tenant isolation, nearest charger, sessions, settlement, freshness, vendor calls, infrastructure |
 | http://localhost:9090 | Prometheus: `gridwatch_pipeline_latency_seconds`, `gridwatch_source_lag_seconds`, `gridwatch:pipeline_latency_seconds:p999_5m`, alerts |
 
@@ -184,7 +184,7 @@ All `/v1` routes need `Authorization: Bearer <JWT>`. The tenant comes from the t
 | `POST /webhooks/csms/:connectionId` | Vendor webhook: HMAC verified, stored, 202 |
 | `GET /v1/sites/status?as_of=` | Per-site rollup with connector status, faults, data age, geocode precision |
 | `GET /v1/map/sites` | GeoJSON of geocoded sites + list of unresolved ones |
-| `GET /v1/chargers/nearest?lat=&lng=&max_km=&limit=&as_of=` | Nearest available connectors, closer sites skipped with reasons |
+| `GET /v1/chargers/nearest?lat=&lng=&max_km=&limit=&as_of=&include_synthetic=` | Nearest available connectors, closer sites skipped with reasons (`include_synthetic=false` leaves out generated demo sites) |
 | `GET /v1/sessions?date=` | Sessions with billing status, review reason, charge |
 | `GET /v1/settlement/statements?date=` | Latest statement version per operator and day |
 | `GET /v1/ingestion/events` | What happened to each event, and why |
