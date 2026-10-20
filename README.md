@@ -6,6 +6,7 @@
 | **B** | [docs/02-architecture-review.md](docs/02-architecture-review.md) | Review of the draft architecture, ranked by severity, with fixes and sign-off questions |
 | **C** | this repository | A runnable slice of the riskiest path: vendor CSMS → normalise → store → live status, nearest-available and daily settlement, correct under duplicates, reordering, malformed data and meter resets |
 | — | [docs/03-questions-and-assumptions.md](docs/03-questions-and-assumptions.md) | Questions for the client, the assumptions made meanwhile, and data-quality findings in the provided stubs |
+| — | [Engineering diagrams](#engineering-diagrams) | Architecture, the path of one event, failure handling, billing, geocoding, settlement and tenancy, drawn in this README |
 
 ## Run it
 
@@ -113,6 +114,234 @@ Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) ru
 - **Held-session review:** a confirmed amount is billed at the session's tariff (at the stop's tariff when no start arrived) and the statement becomes v2; voiding moves a session from held to voided; staff get 403 and another operator 404; an amount the charger couldn't deliver is refused; a second decision gets 409; a late start never re-bills a voided session; a direct UPDATE by another operator changes nothing, and only the review columns are writable.
 - **Coverage and density:** hexagon counts add up to the placed sites, with unplaced ones listed apart; an operator sees only its own cells; cells finer than a postal-area pin can support are refused (400); approximate cells are flagged; a faulted site's surroundings show as a live gap, and a covered cell becomes one when its site goes quiet.
 - **Fixing a missing location:** the reason appears in the map's unresolved list while the site's faults are still tracked; only platform admins can pin (operators get 403); a pin outside the site's country is refused (400); a valid pin puts the site on the map as verified and writes an audit row.
+
+## Engineering diagrams
+
+GitHub draws these from the Mermaid source below.
+
+1. [Production architecture](#1-production-architecture-part-a): what Part A designs
+2. [The slice as it runs](#2-the-slice-as-it-runs): what `docker compose up` starts
+3. [The path of one event](#3-the-path-of-one-event): where the freshness time goes
+4. [Applying an event safely](#4-applying-an-event-safely): duplicates, reordering, bad data
+5. [A session's billing lifecycle](#5-a-sessions-billing-lifecycle): hold, review, bill or void
+6. [From address to map pin](#6-from-address-to-map-pin): no coordinates in the feed
+7. [Daily settlement](#7-daily-settlement): local day, watermark, versions
+8. [Tenant isolation](#8-tenant-isolation): who can see and change what
+
+### 1. Production architecture (Part A)
+One self-contained cell per region (India, EU). Details and the latency budget are in [Part A §2–3](docs/01-architecture.md#2-architecture-overview).
+
+```mermaid
+flowchart LR
+  subgraph Vendor["Vendor CSMS (per CPO)"]
+    WH["Webhook push<br/>batched ≤ 60 s, at-least-once"]
+    VAPI["Poll API<br/>≥ 30 s per site, paginated"]
+  end
+
+  subgraph Cell["GridWatch regional cell (IN or EU)"]
+    direction LR
+    EDGE["Webhook edge<br/>HMAC verify, ack after durable write"]
+    POLL["Poller fleet<br/>leased schedule, adaptive, backoff"]
+    K[("Kafka<br/>csms.raw → events.*<br/>RF3, 7 days")]
+    S3[("S3 raw archive<br/>replay / audit")]
+    NORM["Normaliser<br/>validate, UTC, quarantine"]
+    PROJ["Projectors<br/>idempotent, event-time guarded"]
+    R[("Redis<br/>live state + pub/sub")]
+    TS[("Telemetry PG<br/>TimescaleDB")]
+    CORE[("Core / billing PG<br/>PostGIS, RLS, sync replica")]
+    PUSH["WebSocket gateway"]
+    QAPI["Query API"]
+    TILE["Vector tiles<br/>Martin / ST_AsMVT"]
+    SET["Settlement runner<br/>local day + watermark"]
+  end
+
+  UI["Dashboard + MapLibre map"]
+  IDP["Keycloak<br/>global control plane"]
+
+  WH --> EDGE --> K
+  POLL <--> VAPI
+  POLL --> K
+  K --> S3
+  K --> NORM --> K
+  K --> PROJ
+  PROJ --> R & TS & CORE
+  R --> PUSH --> UI
+  QAPI --> CORE & TS & R
+  TILE --> CORE
+  UI --> QAPI & TILE
+  SET --> CORE
+  IDP -. tokens .-> UI & QAPI & PUSH
+```
+
+### 2. The slice as it runs
+Every box is a `docker compose` service; S3 and Secrets Manager run in LocalStack, created by Terraform. The slice keeps the production shape with lighter parts: a Postgres inbox stands in for Kafka ([D7](docs/01-architecture.md#d7-slice-uses-a-postgres-inbox-instead-of-kafka)), and LISTEN/NOTIFY with Server-Sent Events stands in for Redis and the WebSocket gateway.
+
+```mermaid
+flowchart LR
+  subgraph vendor["csms-fake: test tooling, not GridWatch"]
+    direction TB
+    SCR["Scripted stub scenario<br/>3 pilot sites"]
+    LIVE["Live simulator<br/>47 generated sites"]
+  end
+
+  subgraph ingest["Ingest"]
+    direction TB
+    EDGE["api · webhook edge<br/>HMAC, ack after write"]
+    POLLER["poller<br/>leases, Retry-After,<br/>high-water mark"]
+  end
+
+  INBOX[("csms_inbox<br/>durable raw log")]
+  PROC["processor<br/>validate, apply idempotently,<br/>quarantine per event"]
+  DB[("Postgres 17<br/>core + RLS · TimescaleDB<br/>PostGIS + H3")]
+
+  subgraph serve["Serve"]
+    direction TB
+    HUB["api · change stream<br/>LISTEN → SSE"]
+    QAPI["api · query API<br/>tenant from the JWT"]
+  end
+
+  UI["Dashboard<br/>MapLibre"]
+
+  subgraph support["Supporting services"]
+    direction TB
+    S3[("S3 raw archive")]
+    SM[("Secrets Manager<br/>webhook HMAC secret")]
+    PROM["Prometheus<br/>SLO rules + alerts"]
+  end
+
+  vendor -- "webhooks, batched ≤ 60 s" --> EDGE
+  POLLER -- "polls, ≥ 30 s per site" --> vendor
+  EDGE --> INBOX
+  POLLER --> INBOX
+  INBOX -- "NOTIFY" --> PROC --> DB
+  DB -- "NOTIFY on commit" --> HUB
+  HUB -- "change, IDs only" --> UI
+  UI -- "refetch" --> QAPI --> DB
+  PROC -. "archive" .-> S3
+  EDGE -. "secret" .-> SM
+  PROM -. "scrape" .-> PROC
+```
+
+### 3. The path of one event
+Most of the delay happens at the vendor, before GridWatch receives anything. The dashboard measures GridWatch's own share from receipt to the moment it is drawn.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Charger
+  participant V as Vendor CSMS
+  participant E as Webhook edge / poller
+  participant P as Processor
+  participant D as Postgres
+  participant H as Change stream
+  participant B as Dashboard
+  participant Q as Query API
+
+  C->>V: status change, or a reading every 10 s
+  Note over V: Vendor's share: webhook batches up to 60 s,<br/>polls at most every 30 s, readings by poll only
+  V->>E: signed webhook batch, or a poll page
+  E->>D: durable write to csms_inbox, then 202
+  Note over E: Receipt: GridWatch's clock starts here
+  D-->>P: NOTIFY csms_inbox
+  P->>D: per row, in a savepoint: validate, apply,<br/>record the outcome, pg_notify the change
+  D-->>H: commit delivers the change
+  H-->>B: SSE "change", only to that operator (staff see all)
+  B->>Q: refetch what changed
+  Q->>D: query under row-level security
+  B->>H: report receipt → drawn time
+  Note over E,B: Measured in the demo: receipt → committed about 80 ms (p50),<br/>→ sent about 50–100 ms, → drawn about 0.6 s. Target: 2 s at P99.9
+```
+
+### 4. Applying an event safely
+At-least-once, unordered delivery with no event IDs. Each event is judged on its own, so one bad event never sinks its batch.
+
+```mermaid
+flowchart TD
+  IN["Inbox row: poll page or webhook batch"] --> ENV{"Envelope matches<br/>the vendor contract?"}
+  ENV -- no --> QE["Set the payload aside (quarantine)"]
+  ENV -- yes --> EV["Take each event in turn"]
+  EV --> VAL{"Valid event?<br/>fields, timestamp with offset"}
+  VAL -- no --> QV["Set this event aside;<br/>the rest still apply"]
+  VAL -- yes --> CAT{"Charger known, on this<br/>connection and site?"}
+  CAT -- no --> QC["Set aside: unknown charger<br/>or another operator's feed"]
+  CAT -- yes --> DUP{"Seen before?<br/>natural key"}
+  DUP -- yes --> DU["Duplicate: ignored,<br/>never counted or billed twice"]
+  DUP -- no --> NEW{"Newer than the current<br/>state, by event time?"}
+  NEW -- no --> ST["Stale: kept in history,<br/>live state unchanged"]
+  NEW -- yes --> AP["Applied"]
+  AP --> SES{"Completes a session?"}
+  SES -- yes --> PL{"Energy plausible?<br/>meter reset rebuilt from readings"}
+  PL -- yes --> CH["Charge, unique per session"]
+  PL -- no --> HOLD["Held for review, not billed"]
+```
+
+### 5. A session's billing lifecycle
+Start and stop can arrive in either order. A session that can't be priced safely is held, never billed a guess; the operator (CPO) decides it.
+
+```mermaid
+stateDiagram-v2
+  [*] --> open: session.start
+  [*] --> awaiting_start: session.stop arrives first
+  open --> charged: stop arrives, energy plausible
+  awaiting_start --> charged: start arrives, energy plausible
+  open --> needs_review: implausible energy, meter reset, or no stop in 24 h
+  awaiting_start --> needs_review: no start within the grace period
+  needs_review --> charged: operator bills a confirmed amount
+  needs_review --> voided: operator voids it
+  charged --> [*]
+  voided --> [*]
+  note right of needs_review
+    Each decision is kept in session_reviews and audited.
+    If the day was settled, its statement is re-issued.
+    A late event never re-bills a reviewed session.
+  end note
+```
+
+### 6. From address to map pin
+The feed has addresses only. Every pin records how it was found and how exact it is; a site that can't be placed stays monitored and waits for a person.
+
+```mermaid
+flowchart LR
+  A["Site address<br/>no coordinates in the feed"] --> O{"Operations pin?"}
+  O -- yes --> P1["Verified pin<br/>rooftop"]
+  O -- no --> C{"Geocoder cache or<br/>licensed provider?"}
+  C -- yes --> P2["Street or landmark"]
+  C -- no --> Z{"Postal code in<br/>the postal list?"}
+  Z -- yes --> P3["Postal-area centre, ±2 km<br/>approximate; shared pins shown as a count"]
+  Z -- no --> U["Unresolved: off the map and out of nearest,<br/>still monitored and billed, reason shown"]
+  U -- "admin pins it on the map" --> P1
+```
+
+### 7. Daily settlement
+Each operator is settled on its own local day, and only once the data for that day is in.
+
+```mermaid
+flowchart TD
+  T["Settle operator X for local day D"] --> L{"Day D over in X's time zone,<br/>plus a 2 h grace period?"}
+  L -- no --> NR["Not ready"]
+  L -- yes --> W{"Every site's poll high-water<br/>mark past local midnight?"}
+  W -- no --> NR
+  W -- yes --> S["Charge lines, held and voided sessions for D"]
+  S --> K{"Checksum equals<br/>the latest version?"}
+  K -- yes --> UN["Unchanged: the same statement"]
+  K -- no --> NV["New version n+1;<br/>earlier versions kept"]
+```
+
+### 8. Tenant isolation
+The database enforces it, not application code: a query that forgets its WHERE clause still can't leak another operator's rows.
+
+```mermaid
+flowchart LR
+  TOK["JWT from Keycloak<br/>(demo: /dev/token)<br/>role + operator_id"] --> API["API takes the tenant from the token only;<br/>?operator_id= is never read"]
+  API --> SET["Per transaction:<br/>set_config app.operator_id, app.role"]
+  SET --> RLS{"Row-level security<br/>api role has NOBYPASSRLS"}
+  RLS -- operator --> OWN["Own rows only;<br/>may write only the review columns"]
+  RLS -- "platform admin" --> ALL["All rows;<br/>every query audited"]
+  RLS -- "no tenant set" --> NONE["No rows: fails closed"]
+  ING["Ingest role, BYPASSRLS:<br/>webhook, poller, processor, settlement"] --> DB[("Postgres")]
+  OWN & ALL & NONE --> DB
+  STREAM["Change stream"] -. "same operator filter" .-> OWN
+```
 
 ## Design summary
 Full detail is in [Part A](docs/01-architecture.md). In short:
