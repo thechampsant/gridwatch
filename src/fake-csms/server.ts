@@ -62,7 +62,7 @@ export function buildFakeCsms(o: FakeOptions) {
 
   const lastPoll = new Map<string, number>();
   const polls = new Map<string, number>();
-  const script = { s7Page2Served: false, de1eServed: false, webhooksDone: false, s12FaultServed: false };
+  const script = { s7Page2Served: false, de1eServed: false, webhooksDone: false, s12FaultServed: false, s7PolledAfter429: false };
 
   const app: FastifyInstance = Fastify({ logger: o.logger ?? false });
   app.get('/healthz', async () => ({ ok: true, script }));
@@ -106,6 +106,7 @@ export function buildFakeCsms(o: FakeOptions) {
 
     lastPoll.set(site.siteId, now.getTime());
     if (site.siteId === 'S-IN-0007' && n === 1) return fixture('1a-poll-page1.json');
+    if (site.siteId === 'S-IN-0007' && n >= 3) script.s7PolledAfter429 = true;
     if (site.siteId === 'S-DE-0003' && n === 2) {
       script.de1eServed = true;
       return fixture('1e-malformed-page.json');

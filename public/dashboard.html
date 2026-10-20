@@ -1,1 +1,123 @@
-<!doctype html><title>GridWatch</title><p>Dashboard placeholder</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridWatch operations</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="/dashboard/app.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden="true"><rect x="1" y="1" width="32" height="32" rx="8" stroke="#F4F5F2" stroke-width="2"></rect><path d="M19 6 L11 19 H17 L15 28 L24 15 H18 Z" fill="#8FB0F2"></path></svg>
+      <div>
+        <div class="brand-name">GridWatch</div>
+        <div class="brand-sub">Network operations · live slice</div>
+      </div>
+    </div>
+    <div class="persona">
+      <span class="persona-label">Demo: view as</span>
+      <div role="group" aria-label="Demo: view the dashboard as" class="persona-group" id="personas"></div>
+    </div>
+    <div class="top-note">
+      <div>Tenant scope comes from the sign-in token, never from the URL</div>
+      <div class="mono" id="asof">Loading…</div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="scope">
+    <div>
+      <h1 id="scope-title">GridWatch</h1>
+      <div class="muted" id="scope-meta"></div>
+    </div>
+    <div class="scope-note" id="scope-note"></div>
+  </div>
+
+  <div id="error" class="error" hidden></div>
+
+  <div class="row tiles" id="tiles"></div>
+
+  <div class="row">
+    <section class="card map-card" aria-labelledby="map-h">
+      <div class="card-head">
+        <h2 id="map-h">Live map</h2>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div id="map" class="map" role="region" aria-label="Map of sites coloured by live status"></div>
+      <p class="small muted" id="map-note">Pins come from geocoding each site's address; the vendor feed has no coordinates. A wide halo means the pin is only a postal-code centroid. Click the map to search for the nearest available charger from that point.</p>
+    </section>
+
+    <section class="card sites-card" aria-labelledby="sites-h">
+      <div>
+        <h2 id="sites-h">Sites and connectors</h2>
+        <div class="small muted">Status is a state, not an event, so a quiet Available connector is fine. What ages is the vendor's last confirmation. A site not heard from for 5 minutes is shown as stale and left out of nearest-available.</div>
+      </div>
+      <label class="toggle small"><input type="checkbox" id="show-synthetic"> Show synthetic pilot sites</label>
+      <div id="sites"></div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="card" aria-labelledby="near-h">
+      <div>
+        <h2 id="near-h">Nearest available charger</h2>
+        <div class="small muted">Geodesic distance (PostGIS KNN). Counts only connectors that are Available, recently confirmed by the vendor and free of critical faults, inside your tenant, within 50 km.</div>
+      </div>
+      <div class="chips" role="group" aria-label="Search from" id="points"></div>
+      <div id="nearest" class="panel"></div>
+    </section>
+
+    <section class="card fresh-card" aria-labelledby="fresh-h">
+      <div>
+        <h2 id="fresh-h">Freshness: what the vendor feed allows</h2>
+        <div class="small muted">Bars show how old events already were when the vendor served the poll page (server_time minus event time), before GridWatch receives anything. The dark tick is the contract target. The verdicts come from the interface contract: polls at most every 30 s, webhook batches up to 60 s, meter values by poll only. These samples only illustrate it.</div>
+      </div>
+      <div class="axis mono" aria-hidden="true"><span>0 s</span><span>25 s</span><span>50 s</span><span>75 s</span><span>100 s</span></div>
+      <div id="fresh"></div>
+      <div class="panel small" id="platform"></div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="sess-h">
+    <div class="card-head">
+      <h2 id="sess-h">Sessions and settlement</h2>
+      <div class="small muted">Sample tariffs (the brief has none): Acme ₹18.00/kWh + ₹25 fee, Stadtwerke €0.59/kWh + €0.49 fee.</div>
+    </div>
+    <div id="statements" class="statements"></div>
+    <div id="sessions"></div>
+  </section>
+
+  <section class="card" aria-labelledby="log-h">
+    <div class="card-head">
+      <div>
+        <h2 id="log-h">Ingestion log</h2>
+        <div class="small muted">Every event for the pilot sites, and what the pipeline did with it. Times as the charger reported them.</div>
+      </div>
+      <div class="pills" id="outcomes"></div>
+    </div>
+    <div class="table-scroll"><table class="log" id="log"></table></div>
+  </section>
+
+  <section class="card" id="admin" hidden aria-labelledby="calls-h">
+    <div>
+      <h2 id="calls-h">Vendor CSMS calls and dead-letter queue</h2>
+      <div class="small muted">Visible to GridWatch platform admins only. Every admin query is written to the audit log.</div>
+    </div>
+    <div id="calls"></div>
+    <h3>Quarantine</h3>
+    <div id="quarantine"></div>
+  </section>
+  <p class="small muted" id="not-admin">The vendor call log and dead-letter queue are for GridWatch platform admins. Switch to GridWatch admin at the top to see them.</p>
+
+  <footer class="small muted">GridWatch take-home slice. This demo page refreshes by polling every 5 s; production pushes status deltas over WebSocket (Part A §7.3). Map data © OpenStreetMap contributors.</footer>
+</main>
+<script src="/dashboard/app.js"></script>
+</body>
+</html>

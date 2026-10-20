@@ -1,0 +1,211 @@
+# GridWatch: EV network monitoring, take-home submission
+
+| Part | Where | What it is |
+|---|---|---|
+| **A** | [docs/01-architecture.md](docs/01-architecture.md) | Architecture and design for 50k chargers / 12k sites in India and Germany: data flow, storage, GIS, freshness, HA/DR, sizing, security, observability, decision log, what I would not build |
+| **B** | [docs/02-architecture-review.md](docs/02-architecture-review.md) | Review of the draft architecture, ranked by severity, with fixes and sign-off questions |
+| **C** | this repository | A runnable slice of the riskiest path: vendor CSMS → normalise → store → live status, nearest-available and daily settlement, correct under duplicates, reordering, malformed data and meter resets |
+| — | [docs/03-questions-and-assumptions.md](docs/03-questions-and-assumptions.md) | Questions for the client, the assumptions made meanwhile, and data-quality findings in the provided stubs |
+
+## Run it
+
+Requirements: Docker with Compose v2 and about 4 GB of memory for Docker. The first start pulls about 2 GB of images.
+
+```bash
+docker compose up --build
+```
+
+That single command:
+1. Starts Postgres (TimescaleDB + PostGIS) and LocalStack.
+2. Applies the Terraform in `infra/terraform` to LocalStack (S3 raw-payload archive, Secrets Manager).
+3. Migrates and seeds the pilot catalogue, and geocodes the sites.
+4. Starts the API, processor, poller, a fake vendor CSMS and Prometheus.
+
+The fake vendor plays the stub scenario in about a minute. Then:
+
+| Open | For |
+|---|---|
+| http://localhost:8080/dashboard | The operations dashboard (your canvas design, on live data). Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
+| `./scripts/demo.sh` | A terminal walkthrough: ingestion log, tenant isolation, nearest charger, sessions, settlement, freshness, vendor calls, infrastructure |
+| http://localhost:9090 | Prometheus: `gridwatch_pipeline_latency_seconds`, `gridwatch_source_lag_seconds`, `gridwatch:pipeline_latency_seconds:p999_5m`, alerts |
+
+Tests (unit + integration against the compose database):
+
+```bash
+docker compose --profile test run --rm --build test
+```
+
+From a host with Node 22, `npm ci && npm test` does the same; integration tests need `docker compose up -d db`.
+
+Settle a day by hand (each operator on its own local day, gated by the poll watermark):
+
+```bash
+docker compose exec api node dist/bin/settle.js --date 2026-06-09
+```
+
+Clean up:
+
+```bash
+docker compose down -v
+```
+
+## What the slice proves
+
+The brief asks for "real ingestion working … one correct, useful aggregate". I built the part most likely to sink the project: **correctness and freshness accounting under the vendor's delivery semantics**, plus the map's hardest query.
+
+| Brief requirement | Where | Evidence |
+|---|---|---|
+| Ingest from the CSMS stubs | `src/api/webhook.ts`, `src/ingest/poller.ts`, `src/fake-csms/` | Webhooks verified with HMAC and acknowledged only after a durable write; poller with leases, adaptive schedule, high-water mark from `server_time` |
+| Normalise | `src/ingest/normalize.ts` | Per-event validation; local offsets → UTC, original kept; strict schemas |
+| Store | `migrations/*.sql` | Core tables with RLS; TimescaleDB hypertables with compression and retention; PostGIS geography |
+| Useful aggregates | `src/api/server.ts` | `/v1/sites/status` (rollup with data age), `/v1/chargers/nearest` (geodesic KNN over fresh Available connectors), daily settlement |
+| 429 / 500 / malformed | `src/ingest/poller.ts`, `src/ingest/processor.ts` | 429: honour `Retry-After` and resume from the same cursor. 500: jittered retries, then give up without advancing the high-water mark. Malformed: quarantine per event |
+| `docker compose up` | `docker-compose.yml` | One command, ordered by health and completion conditions |
+| IaC | `infra/terraform` | Applied to LocalStack by the `terraform` service |
+| Tests at failure modes | `test/` | 43 tests, listed below |
+| Coordinates as they arrive | `src/geo/geocoder.ts` | Addresses only → override, cache, postal fallback; precision recorded; unresolved sites kept off the map |
+
+### The stub scenario, end to end
+The live system reproduces the acceptance table from the dashboard design. `./scripts/demo.sh` prints it:
+
+| Stub | Outcome |
+|---|---|
+| 1a / 1b: paginated poll | 4 + 1 events applied; high-water mark advanced only after page 2 |
+| 1c: 429 | `Retry-After: 30` honoured; no retry burst; the cursor would be kept |
+| 1d: 500 | Retried with jitter, then 1e served |
+| 1e: malformed page | The null-energy reading and the status with no connector are each quarantined; nothing else is lost |
+| 2a + 2b: duplicate stop | `sess-de-99x` billed **once**: 41.420 kWh → **€24.93** (sample tariff) |
+| 2c: out-of-order | Final status `Available @ 14:33:40`; the older `Charging` is marked stale; the session merges stop-before-start |
+| 2c: `sess-in-44a` | **Held**: 11.667 kWh in 7 min 19 s is about 96 kW on a 60 kW charger (its own readings show about 41 kW) |
+| 2d: meter reset | **Held**, never billed negative |
+| Pilot GroundFailure | Connector shown Faulted; site skipped by nearest-available, with the reason |
+
+### The tests
+Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) run against real Postgres with TimescaleDB and PostGIS.
+- **Poller:** pagination with the high-water mark advanced only at the end; 429 mid-pagination resumes from the saved cursor; 500 then success; persistent 500 doesn't advance the high-water mark; failure part-way re-reads the same window.
+- **Normaliser:** offsets → UTC; each malformed event in 1e rejected on its own; no-offset timestamps and unknown statuses rejected.
+- **Energy:** register delta; implausible energy held; stop-before-start waits; meter reset held; reset rebuilt from bracketing readings; not rebuilt when readings are too far apart.
+- **Webhook HMAC:** hex, base64 and prefixed forms accepted; tampered body, wrong secret and missing header rejected; previous secret accepted during rotation.
+- **Acceptance:** the stub scenario produces exactly the 16 outcomes in the design.
+- **Replay:** replaying every payload changes nothing.
+- **Convergence:**
+  - All **24 orderings** of the 2c batch converge, both within one batch and as separate deliveries.
+  - Two processors racing on the same session converge.
+- **Billing:**
+  - 2a + 2b + 2a = one charge.
+  - Reset rebuilt from readings bills 12.000 kWh = ₹241.00.
+  - 77c without readings is never billed.
+- **Settlement:**
+  - A 02:00 IST run is refused because the Berlin day hasn't ended.
+  - It waits for the poll watermark, then settles; a re-run returns the same statement.
+  - A 00:30 CEST stop belongs to 10 June in Berlin.
+  - Late data issues statement v2.
+- **Tenant isolation:** `?operator_id=` is ignored; admins see all tenants and operators get 403 on admin routes; forged tokens rejected; the database returns no rows when no tenant is set.
+- **Webhook endpoint:** a bad signature stores nothing; a good one is acknowledged after the write.
+- **Nearest-available:** geodesic distance within 0.5% of haversine; faulted, stale and ungeocoded sites skipped with reasons; never another tenant's chargers.
+
+## Design summary
+Full detail is in [Part A](docs/01-architecture.md). In short:
+- **Freshness.**
+  - The contract's < 5 s / < 10 s targets can't be met through this vendor interface: webhooks are batched up to 60 s, polls are ≥ 30 s, and meter values come by poll only.
+  - We commit to **receipt → screen ≤ 2 s P99.9**, measure the vendor's share separately (`/v1/freshness`), show data age everywhere, and negotiate the feed.
+- **Correctness.** At-least-once, unordered, no event IDs. So: natural-key idempotency at every sink, live state moves only forward in event time, sessions merge commutatively, charges are unique per session.
+- **Storage.** Postgres family in two clusters: telemetry (TimescaleDB, async, rebuildable from Kafka) and core/billing (PostGIS, RLS, synchronous replication). Kafka in front as the durable raw log; S3 as the archive; Redis for the push path.
+- **Map.**
+  - Geocode at onboarding, recording precision, with human override.
+  - `geography` + GiST KNN for nearest-available.
+  - H3 and admin polygons for density.
+  - Vector tiles plus pushed status deltas to MapLibre.
+- **Cells.** One self-contained deployment per region (India, EU) for residency and blast radius; DR in the same jurisdiction.
+
+### Decision log (summary)
+| # | Decision | Instead of |
+|---|---|---|
+| D1 | Re-baseline the freshness KPIs to receipt → screen; report vendor lag separately; negotiate the feed | Promising targets the interface can't meet |
+| D2 | PostgreSQL + TimescaleDB + PostGIS, split into telemetry and core clusters | One Postgres for everything, or a zoo of specialised stores |
+| D3 | Idempotent, event-time-guarded sinks | Kafka exactly-once or a dedupe cache (the duplicates start at the vendor) |
+| D4 | Geocoding pipeline with precision and human override | Requiring CPO coordinates, or geocoding on the fly |
+| D5 | Hold implausible and reset sessions for review | Billing a guess or a lower bound |
+| D6 | Regional cells | A single global deployment, or active-active writes |
+| D7 | The slice uses a Postgres inbox, not Kafka | Spending the slice on infrastructure that's already proven. It doesn't test rebalances or offset rewind |
+
+## Assumptions
+The full list with what changes if each is wrong is in [docs/03](docs/03-questions-and-assumptions.md). The main ones:
+- The freshness KPIs are ours from receipt.
+- The vendor's 30 s limit is per site, and pagination doesn't count.
+- A successful poll confirms a site's current state.
+- `session_id` is unique per vendor connection.
+- The site catalogue comes from onboarding.
+- Tariffs are in local currency, with no FX conversion.
+- Settlement is a reconciliation ledger, not the legal invoice.
+- A session belongs to the local business day of its stop.
+
+## Demo shortcuts (labelled, not hidden)
+- **`DEMO_MODE=true`**
+  - Enables `POST /dev/token`, so the dashboard can switch personas without Keycloak. Tokens carry the same claims Keycloak would issue.
+  - Pauses TimescaleDB retention and compression jobs, because the stub data is dated June 2026 and would be dropped immediately.
+- **Synthetic pilot.** The pilot data is a 3-site excerpt, and the "starter kit" it mentions wasn't provided. `scripts/generate-synthetic-pilot.mjs` deterministically expands it to the brief's 50 sites / 220 chargers.
+  - Every generated site is marked `synthetic`.
+  - Synthetic sites resolve to postal-code centroids, so several share a point. That is what "postal_code precision" looks like on a map.
+  - Two synthetic sites have no postal code on purpose and stay unresolved.
+- **The fake vendor** (`src/fake-csms`) serves the stub payloads in a fixed script and pushes the signed webhooks. It is test tooling, not part of GridWatch.
+- **Sample tariffs** (`seed/tariffs.json`, `is_sample = true`): Acme ₹18.00/kWh + ₹25, Stadtwerke €0.59/kWh + €0.49, excluding tax.
+- **Hand-entered coordinates.** The geocode override and cache entries for the three real sites are approximate, standing in for the operations queue and a provider.
+- **Polling interval.** The demo polls idle sites every 60 s so the scenario finishes quickly; production would use 2–5 min.
+- **LocalStack is pinned to 4.14.0,** the last release that runs without an account token.
+
+## Repository layout
+```
+docs/                 Part A, Part B, questions and assumptions
+src/
+  api/                Fastify API: webhook receiver, query endpoints, auth, site status, freshness
+  csms/               Vendor contract: schemas, HTTP client, HMAC
+  ingest/             Normaliser, apply logic, processor, poller (+ poll store)
+  billing/            Session energy rules, settlement
+  geo/                Geocoding chain
+  archive/            S3 raw archive, Secrets Manager
+  fake-csms/          Stand-in vendor for the demo
+  bin/                Entrypoints: api, processor, poller, migrate, settle, mint-token, fake-csms
+migrations/           Plain SQL, applied in order
+seed/                 Pilot data (verbatim), synthetic expansion, gazetteer, tariffs, geocode seed
+fixtures/stubs/       The vendor stub payloads, verbatim
+public/               Dashboard page (HTML/JS/CSS, MapLibre)
+infra/terraform/      S3 + Secrets Manager (LocalStack locally)
+ops/prometheus/       Scrape config, SLO recording rules, burn-rate alerts
+test/                 unit/ and integration/
+scripts/              demo.sh, synthetic pilot generator
+```
+
+## API
+All `/v1` routes need `Authorization: Bearer <JWT>`. The tenant comes from the token's `operator_id` claim and nothing else.
+
+| Route | Returns |
+|---|---|
+| `POST /webhooks/csms/:connectionId` | Vendor webhook: HMAC verified, stored, 202 |
+| `GET /v1/sites/status?as_of=` | Per-site rollup with connector status, faults, data age, geocode precision |
+| `GET /v1/map/sites` | GeoJSON of geocoded sites + list of unresolved ones |
+| `GET /v1/chargers/nearest?lat=&lng=&max_km=&limit=&as_of=` | Nearest available connectors, closer sites skipped with reasons |
+| `GET /v1/sessions?date=` | Sessions with billing status, review reason, charge |
+| `GET /v1/settlement/statements?date=` | Latest statement version per operator and day |
+| `GET /v1/ingestion/events` | What happened to each event, and why |
+| `GET /v1/freshness` | Vendor age when served vs. platform latency per KPI |
+| `GET /v1/admin/csms-calls`, `GET /v1/admin/quarantine` | Platform admins only, audited |
+| `GET /metrics`, `/healthz`, `/readyz` | Operations |
+
+Get a token outside the dashboard:
+
+```bash
+docker compose exec api node dist/bin/mint-token.js acme-charge
+```
+
+## Where I stopped, and what's next
+**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 43 tests passing.
+
+**Next, in priority order:**
+1. **Swap the inbox for Kafka** (D7). Put `processRow` behind a consumer and test rebalances and the offset-rewind runbook after a database failover. Load-test to 20k events/s to check the sizing in Part A §10.
+2. **Push instead of poll on the dashboard.** Redis live state plus a WebSocket gateway; measure receipt → render with a browser beacon, so the "≤ 2 s P99.9" commitment is measured end to end, not only to commit.
+3. **Telemetry rollups.** Continuous aggregates with `counter_agg` (reset-aware energy) and `state_agg` (utilisation), and an integer `connector_key` instead of text IDs in hypertables.
+4. **Density and coverage.** Admin boundary polygons, an H3 grid, chargers per km², gap detection; vector tiles via Martin.
+5. **Settlement operations.** Scheduled per-operator runs after local midnight, an exceptions workflow for held sessions, and a re-rate audit trail.
+6. **Live simulator profile** for the fake vendor (continuous sessions, random 429/500/duplicates) to exercise the adaptive poller and SLO alerts over hours rather than one scripted minute.
+7. **Production IaC.** The Terraform module pointed at real AWS with an S3 state backend and locking, plus managed Postgres (Multi-AZ), MSK and ElastiCache modules for one regional cell.

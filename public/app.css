@@ -1,0 +1,113 @@
+:root {
+  --bg: #eef0ec;
+  --card: #ffffff;
+  --ink: #16181d;
+  --ink-2: #3e444d;
+  --muted: #5b616b;
+  --line: #dadfd6;
+  --line-2: #eef0ec;
+  --soft: #f6f7f4;
+  --blue: #1d5fd0;
+  --blue-bg: #e5edfb;
+  --amber: #e59a1f;
+  --amber-ink: #7a4a00;
+  --amber-bg: #fcf0dc;
+  --red: #c0362c;
+  --red-ink: #b0302a;
+  --red-bg: #fbe9e7;
+  --grey: #9aa1ab;
+  --grey-bg: #eceef1;
+  --green-ink: #176b5b;
+  --green-bg: #e1f2ee;
+  --purple-ink: #5b33b3;
+  --purple-bg: #eee8fa;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 'IBM Plex Sans', system-ui, sans-serif; }
+button { font: inherit; }
+h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+h3 { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
+.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.top { background: var(--ink); color: #f4f5f2; }
+.top-inner { max-width: 1360px; margin: 0 auto; padding: 14px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-name { font-size: 18px; font-weight: 700; }
+.brand-sub { font-size: 12px; color: #aeb4be; }
+.persona { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.persona-label { font-size: 11px; font-weight: 600; color: #aeb4be; text-transform: uppercase; letter-spacing: 0.08em; }
+.persona-group { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; background: #262a31; border-radius: 10px; }
+.persona-group button { min-height: 44px; padding: 6px 14px; border: 0; border-radius: 7px; cursor: pointer; text-align: left; background: transparent; color: #d7dbe0; }
+.persona-group button[aria-pressed='true'] { background: #f4f5f2; color: var(--ink); }
+.persona-group .role { display: block; font-size: 11px; opacity: 0.8; }
+.persona-group .who { display: block; font-weight: 600; }
+.top-note { margin-left: auto; font-size: 12px; color: #aeb4be; line-height: 1.55; }
+.wrap { max-width: 1360px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+.scope { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; }
+.scope-note { font-size: 13px; color: var(--ink-2); max-width: 540px; }
+.row { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 1 1 400px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; }
+.map-card { flex: 999 1 600px; }
+.sites-card { flex: 1 1 360px; max-height: 760px; overflow: auto; }
+.fresh-card { flex: 1.4 1 520px; }
+.error { background: var(--red-bg); color: var(--red-ink); border-radius: 10px; padding: 12px 14px; }
+.tiles .tile { flex: 1 1 190px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+.tile-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tile-value { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile-unit { font-size: 14px; color: var(--muted); margin-left: 6px; }
+.tile-sub { font-size: 13px; color: var(--muted); }
+.status-tile { flex: 2 1 300px; }
+.bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--grey-bg); }
+.counts { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--ink-2); }
+.map { height: 480px; border-radius: 8px; border: 1px solid #e1e5ea; background: #f2f4f6; }
+.map-fallback { display: flex; align-items: center; justify-content: center; height: 100%; padding: 24px; text-align: center; color: var(--muted); }
+.toggle { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.site { border: 1px solid #e3e6e0; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.site-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.site-name { font-size: 15px; font-weight: 600; }
+.site-id { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted); font-weight: 500; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px 6px; padding-top: 4px; }
+.badge { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 999px; background: var(--grey-bg); color: var(--ink-2); }
+.pill { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+.conn { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line-2); }
+.conn-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 10px; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips button { min-height: 44px; padding: 8px 14px; border-radius: 8px; border: 1px solid #c9cdc5; background: #fff; color: var(--ink); cursor: pointer; font-weight: 500; }
+.chips button[aria-pressed='true'] { background: var(--ink); color: #fff; border-color: var(--ink); }
+.panel { background: var(--soft); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.near-name { font-size: 20px; font-weight: 600; }
+.skip { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; padding: 8px 0; border-top: 1px solid var(--line-2); }
+.axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.fresh-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line-2); }
+.fresh-row .top-line, .fresh-row .bottom-line { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; }
+.track { position: relative; height: 14px; background: var(--grey-bg); border-radius: 7px; }
+.track .fill { position: absolute; top: 0; bottom: 0; border-radius: 7px; min-width: 8px; }
+.track .tick { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); }
+.statements { display: flex; flex-wrap: wrap; gap: 12px; }
+.statement { flex: 1 1 260px; background: var(--soft); border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+.session { border: 1px solid #e3e6e0; border-radius: 10px; padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 12px 28px; margin-top: 10px; }
+.session > div { flex: 1 1 190px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.session .why { flex: 2 1 300px; font-size: 13px; color: var(--ink-2); }
+.k { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.table-scroll { overflow-x: auto; border: 1px solid #e3e6e0; border-radius: 10px; }
+table.log { border-collapse: collapse; min-width: 1100px; width: 100%; font-size: 13px; }
+table.log th { text-align: left; background: var(--soft); font-size: 11px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 12px; }
+table.log td { padding: 9px 12px; border-top: 1px solid var(--line-2); vertical-align: top; }
+table.log td.mono { font-size: 12px; white-space: nowrap; }
+.call { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 16px; padding: 10px 0; border-top: 1px solid var(--line-2); }
+.call .req { flex: 2 1 380px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; word-break: break-all; }
+.call .how { flex: 3 1 360px; font-size: 13px; color: var(--ink-2); }
+footer { padding: 12px 4px 24px; border-top: 1px solid var(--line); }
+.maplibregl-popup-content { font: 13px/1.4 'IBM Plex Sans', system-ui, sans-serif; }
+@media (max-width: 640px) {
+  .wrap { padding: 16px; }
+  .top-inner { padding: 12px 16px; }
+  .top-note { margin-left: 0; }
+  .map { height: 360px; }
+}

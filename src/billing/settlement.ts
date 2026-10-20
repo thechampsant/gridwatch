@@ -64,10 +64,13 @@ export async function runSettlement(
       if (o.now < readyAt) {
         return { status: 'not_ready', reason: `local day ends ${op.day_end.toISOString()}; ready after ${readyAt.toISOString()}` };
       }
-      if (op.unpolled > 0 || !op.min_hwm || op.min_hwm < op.day_end) {
+      if (op.unpolled > 0 || !op.min_hwm) {
+        return { status: 'not_ready', reason: `${op.unpolled} site(s) not yet polled successfully; data may still be arriving` };
+      }
+      if (op.min_hwm < op.day_end) {
         return {
           status: 'not_ready',
-          reason: `${op.unpolled} site(s) never polled or a poll high-water mark is before the end of the day; data may still be arriving`,
+          reason: `a site's poll high-water mark (${op.min_hwm.toISOString()}) is before the end of the local day (${op.day_end.toISOString()}); data may still be arriving`,
         };
       }
     }

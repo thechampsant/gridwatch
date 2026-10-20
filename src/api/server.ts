@@ -281,7 +281,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { counts, events: rows.rows.map((r) => ({ ...r, sourceLabel: sourceLabel(r.source, r.delivery_ref, r.site_id) })) };
   });
 
-  app.get('/v1/freshness', async (req) => run(req, (c) => freshnessReport(c)));
+  app.get('/v1/freshness', async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    return run(req, (c) => freshnessReport(c, q.include_synthetic === 'true'));
+  });
 
   const isAdmin = (req: FastifyRequest) => req.tenant?.role === 'platform_admin';
 
