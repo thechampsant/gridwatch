@@ -1,15 +1,18 @@
 # promtool test rules ops/prometheus/rules.test.yml
-# The burn-rate alert must fire on a slow pipeline and stay silent on an idle one.
+# Each alert must fire when it should and stay silent when the system is
+# idle or healthy. Bucket labels are tested in both spellings: le="1" (as
+# exporters write them) and le="1.0" (as Prometheus 3 stores them).
 rule_files:
   - rules.yml
 evaluation_interval: 1m
 tests:
+  # ---- Platform freshness: receipt -> committed > 1 s -----------------------
   - name: idle pipeline does not page
     interval: 1m
     input_series:
       - series: 'gridwatch_pipeline_latency_seconds_count'
         values: '0x120'
-      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1"}'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1.0"}'
         values: '0x120'
     alert_rule_test:
       - eval_time: 90m
@@ -21,14 +24,14 @@ tests:
     input_series:
       - series: 'gridwatch_pipeline_latency_seconds_count'
         values: '0+100x120'
-      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1"}'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1.0"}'
         values: '0+100x120'
     alert_rule_test:
       - eval_time: 90m
         alertname: FreshnessBudgetBurnFast
         exp_alerts: []
 
-  - name: 10% of events slower than 1 s pages
+  - name: 10% of events slower than 1 s pages (le="1")
     interval: 1m
     input_series:
       - series: 'gridwatch_pipeline_latency_seconds_count'
@@ -42,3 +45,109 @@ tests:
           - exp_labels: { severity: page }
             exp_annotations:
               summary: "Platform freshness SLO burning fast (receipt -> committed > 1 s)"
+
+  - name: 10% of events slower than 1 s pages (le="1.0", as Prometheus 3 stores it)
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_pipeline_latency_seconds_count'
+        values: '0+100x120'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1.0"}'
+        values: '0+90x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: FreshnessBudgetBurnFast
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "Platform freshness SLO burning fast (receipt -> committed > 1 s)"
+
+  # ---- Dashboard tile: receipt -> drawn on screen > 2 s ----------------------
+  - name: no dashboards open does not page
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_pipeline_latency_seconds_count'
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DashboardFreshnessBurnFast
+        exp_alerts: []
+
+  - name: renders inside 2 s do not page
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_receipt_to_render_seconds_count{tenant="acme-charge"}'
+        values: '0+60x120'
+      - series: 'gridwatch_receipt_to_render_seconds_bucket{tenant="acme-charge",le="2.0"}'
+        values: '0+60x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DashboardFreshnessBurnFast
+        exp_alerts: []
+
+  - name: 5% of renders slower than 2 s pages
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_receipt_to_render_seconds_count{tenant="acme-charge"}'
+        values: '0+60x120'
+      - series: 'gridwatch_receipt_to_render_seconds_bucket{tenant="acme-charge",le="2.0"}'
+        values: '0+57x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DashboardFreshnessBurnFast
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "Dashboard tile SLO burning fast (receipt -> drawn on screen > 2 s)"
+
+  # ---- Set-aside (quarantined) events ----------------------------------------
+  - name: a few broken events among many do not raise a ticket
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_events_total{source="poll",type="status",outcome="applied"}'
+        values: '0+400x60'
+      - series: 'gridwatch_quarantined_total{reason="invalid_status"}'
+        values: '0+0.1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarantineSpike
+        exp_alerts: []
+
+  - name: a high share on a quiet feed is below the floor
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_events_total{source="poll",type="status",outcome="applied"}'
+        values: '0+2x60'
+      - series: 'gridwatch_quarantined_total{reason="invalid_status"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarantineSpike
+        exp_alerts: []
+
+  - name: one event in six set aside raises a ticket
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_events_total{source="poll",type="status",outcome="applied"}'
+        values: '0+50x60'
+      - series: 'gridwatch_quarantined_total{reason="invalid_status"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarantineSpike
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "More than 5% of vendor events are being set aside (quarantined)"
+
+  - name: everything set aside (nothing applies at all) raises a ticket
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_quarantined_total{reason="invalid_envelope"}'
+        values: '0+30x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarantineSpike
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "More than 5% of vendor events are being set aside (quarantined)"

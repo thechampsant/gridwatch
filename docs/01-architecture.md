@@ -530,7 +530,7 @@ You can't defend a freshness contract with CPU graphs. The service-level indicat
 - **Multi-window burn-rate alerts** (5 m and 1 h at 14.4× for paging; 6 h and 3 d for tickets), backlog-age alerts, quarantine-rate spikes, "vendor feed degraded" per connection, and "settlement not ready past deadline".
 - **OpenTelemetry tracing** with context propagated through Kafka headers, and exemplars linking slow histogram buckets to traces.
 
-The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipeline_latency_seconds` (observed after commit), `gridwatch_push_age_at_send_seconds`, `gridwatch_receipt_to_render_seconds` (from the dashboard's reports), inbox backlog age, CSMS outcomes and quarantine counters, Prometheus recording rules and burn-rate alerts (`ops/prometheus/rules.yml`, unit-tested with `promtool` so an idle pipeline never pages), and `/v1/freshness`. A live simulator on the generated sites keeps traffic, faults and vendor errors flowing, so these signals move during a demo.
+The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipeline_latency_seconds` (observed after commit), `gridwatch_push_age_at_send_seconds`, `gridwatch_receipt_to_render_seconds` (from the dashboard's reports), inbox backlog age, CSMS outcomes and quarantine counters, Prometheus recording rules and alerts (`ops/prometheus/rules.yml`): burn rate on receipt → committed and on receipt → screen, backlog age, vendor polls failing, and quarantine spikes, each unit-tested with `promtool` to fire when it should and stay silent when idle, and `/v1/freshness`. A live simulator on the generated sites keeps traffic, faults and vendor errors flowing, so these signals move during a demo.
 
 ---
 

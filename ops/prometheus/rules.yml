@@ -10,17 +10,39 @@ groups:
         expr: histogram_quantile(0.999, sum by (le) (rate(gridwatch_pipeline_latency_seconds_bucket[5m])))
       - record: gridwatch:source_lag_seconds:p99_5m
         expr: histogram_quantile(0.99, sum by (le, source, type) (rate(gridwatch_source_lag_seconds_bucket[5m])))
-      # Share of events slower than 1 s (bucket le="1") = error ratio for the platform SLO.
+      # Share of events slower than 1 s = error ratio for the platform SLO.
       # Written as slow / all, so with no traffic it is 0/0 = NaN and never
       # fires: an idle pipeline is not a slow one.
+      # Prometheus 3 stores bucket bounds as floats (le="1.0"); exporters and
+      # Prometheus 2 write le="1". Match both, or the ratio is silently empty.
       - record: gridwatch:pipeline_slow_ratio:rate5m
         expr: |
-          (sum(rate(gridwatch_pipeline_latency_seconds_count[5m])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[5m])))
+          (sum(rate(gridwatch_pipeline_latency_seconds_count[5m])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le=~"1|1.0"}[5m])))
             / sum(rate(gridwatch_pipeline_latency_seconds_count[5m]))
       - record: gridwatch:pipeline_slow_ratio:rate1h
         expr: |
-          (sum(rate(gridwatch_pipeline_latency_seconds_count[1h])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[1h])))
+          (sum(rate(gridwatch_pipeline_latency_seconds_count[1h])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le=~"1|1.0"}[1h])))
             / sum(rate(gridwatch_pipeline_latency_seconds_count[1h]))
+
+      # The dashboard-tile KPI (receipt -> drawn on screen < 2 s, P99.9), from
+      # what open dashboards report. No dashboards open: NaN, silent.
+      - record: gridwatch:render_slow_ratio:rate5m
+        expr: |
+          (sum(rate(gridwatch_receipt_to_render_seconds_count[5m])) - sum(rate(gridwatch_receipt_to_render_seconds_bucket{le=~"2|2.0"}[5m])))
+            / sum(rate(gridwatch_receipt_to_render_seconds_count[5m]))
+      - record: gridwatch:render_slow_ratio:rate1h
+        expr: |
+          (sum(rate(gridwatch_receipt_to_render_seconds_count[1h])) - sum(rate(gridwatch_receipt_to_render_seconds_bucket{le=~"2|2.0"}[1h])))
+            / sum(rate(gridwatch_receipt_to_render_seconds_count[1h]))
+
+      # Share of incoming events set aside as broken, unknown or conflicting.
+      # Events that apply are counted once; set-aside ones are counted by
+      # reason. If nothing applies at all (a vendor schema change), the
+      # "or vector(0)" keeps the ratio at 1 instead of empty.
+      - record: gridwatch:quarantine_ratio:rate10m
+        expr: |
+          sum(rate(gridwatch_quarantined_total[10m]))
+            / ((sum(rate(gridwatch_events_total{outcome!="quarantined"}[10m])) or vector(0)) + sum(rate(gridwatch_quarantined_total[10m])))
 
       # Multi-window burn rate for a 99.9% objective (error budget 0.1%):
       # page when the budget burns 14.4x too fast over both 5 m and 1 h.
@@ -30,6 +52,14 @@ groups:
         labels: { severity: page }
         annotations:
           summary: "Platform freshness SLO burning fast (receipt -> committed > 1 s)"
+
+      # Same 99.9% objective for what the customer actually sees.
+      - alert: DashboardFreshnessBurnFast
+        expr: gridwatch:render_slow_ratio:rate5m > (14.4 * 0.001) and gridwatch:render_slow_ratio:rate1h > (14.4 * 0.001)
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "Dashboard tile SLO burning fast (receipt -> drawn on screen > 2 s)"
 
       # Leading indicator: backlog grows before latency does.
       - alert: InboxBacklogGrowing
@@ -47,3 +77,13 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: "More than 20% of vendor poll requests failing"
+
+      # A jump in set-aside events usually means the vendor changed its
+      # payloads. The floor keeps a few broken events in a quiet hour from
+      # raising a ticket.
+      - alert: QuarantineSpike
+        expr: gridwatch:quarantine_ratio:rate10m > 0.05 and sum(increase(gridwatch_quarantined_total[10m])) > 20
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "More than 5% of vendor events are being set aside (quarantined)"
