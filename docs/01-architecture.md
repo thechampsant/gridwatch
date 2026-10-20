@@ -51,7 +51,7 @@ Five decisions shape everything else:
 - Coverage and density on the H3 grid, with supply-only gaps that follow live status.
 - The exceptions queue: the operator bills or voids a held session, enforced by row-level security, and the day's statement is re-issued.
 - Changes pushed to dashboards, with receipt → screen measured from the browser; a live simulator keeps the generated sites busy within the vendor contract.
-- 82 tests aimed at the failure modes, plus `promtool` tests for the alert rules.
+- 86 tests aimed at the failure modes, plus `promtool` tests for the alert rules.
 - The slice uses a Postgres inbox where production would use Kafka (decision D7).
 
 ---
@@ -517,7 +517,7 @@ You can't defend a freshness contract with CPU graphs. The service-level indicat
 |---|---|---|
 | Vendor lag (poll) | `server_time − event_ts` per event | Vendor |
 | Vendor lag (webhook) | `receipt − event_ts`, corrected by a per-charger clock-skew estimate | Vendor |
-| Pipeline latency | Receipt → state committed (histogram) | GridWatch |
+| Pipeline latency | Receipt → state committed (histogram), fresh events only; events recovered by deep reconciliation count as "missed by the normal path" instead | GridWatch |
 | Push latency | Committed → WebSocket sent | GridWatch |
 | Render latency | Browser beacon: the server stamps each push with its age since receipt; the browser adds arrival → painted on its own monotonic clock, so no clock offset is needed | GridWatch |
 | Backlog age | Age of oldest unprocessed raw payload / consumer lag in seconds | GridWatch (leading indicator) |

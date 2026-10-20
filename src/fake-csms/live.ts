@@ -212,18 +212,15 @@ export class LiveSim {
     return out.sort((a, b) => a.deliverAtMs - b.deliverAtMs);
   }
 
+  // The state at start-up, reported at the boot time itself. Nothing is
+  // back-dated: if this fake restarts, history it already served must not be
+  // rewritten with different values (a real vendor's history doesn't change).
   private initial(c: Conn): void {
     const u = c.rng();
     const boot = this.o.bootMs;
-    if (u < 0.15) {
-      const startMs = boot - Math.floor((1 + c.rng() * 19) * 60_000);
-      this.startSession(c, startMs);
-      for (let t = startMs + TICK_MS; t < boot; t += TICK_MS) this.reading(c, t);
-    } else if (u < 0.18) {
-      this.fault(c, boot - Math.floor((1 + c.rng() * 29) * 60_000));
-    } else {
-      this.emit(c, boot - Math.floor(c.rng() * 240_000), { type: 'status', status: 'Available' });
-    }
+    if (u < 0.15) this.startSession(c, boot);
+    else if (u < 0.18) this.fault(c, boot);
+    else this.emit(c, boot, { type: 'status', status: 'Available' });
   }
 
   private step(c: Conn, t: number): void {

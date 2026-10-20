@@ -72,6 +72,10 @@ describe('live simulator: physics and cadence', () => {
     }
   });
 
+  it('never back-dates anything, so a restart cannot rewrite served history', () => {
+    expect(events.every((e) => Date.parse(e.ts) >= T0)).toBe(true);
+  });
+
   it('is the same however often it is advanced', () => {
     const a = new LiveSim(SITES, { ...OPTS, bootMs: T0 });
     const b = new LiveSim(SITES, { ...OPTS, bootMs: T0 });

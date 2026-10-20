@@ -100,7 +100,11 @@ export async function freshnessReport(c: Client, includeSynthetic = false, rende
               percentile_cont(ARRAY[0.5, 0.99, 0.999]) WITHIN GROUP (ORDER BY extract(epoch FROM processed_at - received_at)) AS p,
               max(extract(epoch FROM processed_at - received_at))::float8 AS max
          FROM (SELECT processed_at, received_at FROM ingest_outcomes
-                WHERE outcome IN ('applied', 'held') ORDER BY outcome_id DESC LIMIT $1) o`,
+                WHERE outcome IN ('applied', 'held')
+                  -- Events recovered by deep reconciliation are excluded, as in
+                  -- the Prometheus SLI: nobody was waiting on their re-read.
+                  AND coalesce(delivery_ref, '') NOT LIKE 'reconcile:%'
+                ORDER BY outcome_id DESC LIMIT $1) o`,
       [WINDOW],
     )
   ).rows[0];

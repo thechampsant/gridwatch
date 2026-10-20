@@ -3,7 +3,7 @@ import { fixedClock } from '../../src/clock.js';
 import { CsmsClient, retryAfterSeconds, type FetchFn } from '../../src/csms/client.js';
 import type { PollPage } from '../../src/csms/schemas.js';
 import type { CallRecord, PollStore, SiteLease } from '../../src/ingest/poll-store.js';
-import { nextPollDelaySec, pollSite, type PollerDeps, type PollerOptions } from '../../src/ingest/poller.js';
+import { nextPollDelaySec, pollSite, reconcileDue, reconcilePhaseSec, type PollerDeps, type PollerOptions } from '../../src/ingest/poller.js';
 import { STUBS, stub } from '../helpers/fixtures.js';
 
 // The poller against a scripted vendor: each test lines up the exact HTTP
@@ -185,6 +185,30 @@ describe('poll cycle against the vendor stubs', () => {
 });
 
 describe('poll schedule', () => {
+  it('spreads deep reconciliation across the hour, even for sites that started together', () => {
+    const sites = Array.from({ length: 47 }, (_, i) => `S-IN-${String(i + 1).padStart(4, '0')}`);
+    const started = new Date('2026-10-20T18:09:00Z'); // every site last reconciled in the same minute
+    const firstDue = sites.map((id) => {
+      for (let m = 1; m <= 61; m++) if (reconcileDue(id, started, new Date(started.getTime() + m * 60_000), 3600)) return m;
+      return null;
+    });
+    expect(firstDue.every((m) => m !== null && m <= 60)).toBe(true);
+    const perMinute = new Map<number, number>();
+    for (const m of firstDue) perMinute.set(m!, (perMinute.get(m!) ?? 0) + 1);
+    expect(Math.max(...perMinute.values())).toBeLessThanOrEqual(4); // was all 47 at once
+    expect(perMinute.size).toBeGreaterThan(25);
+  });
+
+  it('reconciles each site once per period, at its own phase', () => {
+    const id = 'S-DE-0003';
+    const phase = reconcilePhaseSec(id, 3600);
+    const hourStart = Date.parse('2026-10-20T10:00:00Z');
+    const at = (sec: number) => new Date(hourStart + sec * 1000);
+    expect(reconcileDue(id, at(phase), at(phase + 3599), 3600)).toBe(false);
+    expect(reconcileDue(id, at(phase), at(phase + 3600), 3600)).toBe(true);
+    expect(reconcileDue(id, null, at(0), 3600)).toBe(true);
+  });
+
   it('polls sites with a session in progress every 30 s and idle sites less often', () => {
     expect(nextPollDelaySec({ active: true, consecutiveFailures: 0 }, opts)).toBe(30);
     expect(nextPollDelaySec({ active: false, consecutiveFailures: 0 }, opts)).toBe(120);

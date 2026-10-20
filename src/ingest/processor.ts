@@ -38,7 +38,7 @@ interface InboxRow {
 // event types timed for the receipt -> committed latency.
 interface RowChanges {
   byOperator: Map<string, { sites: Set<string>; kinds: Set<ChangeKind> }>;
-  appliedTypes: string[];
+  appliedTypes: string[]; // fresh events only: see processRow
 }
 
 // Claims up to batchSize pending inbox rows and applies them. Each row runs in
@@ -183,7 +183,11 @@ async function processRow(c: Client, row: InboxRow, opts: ProcessorOptions): Pro
     metrics.events.inc({ source: row.source, type, outcome: outcome.outcome });
     if (outcome.outcome === 'applied' || outcome.outcome === 'held') {
       metrics.sourceLag.observe({ source: row.source, type }, Math.max(0, secondsBetween(reference, ev.ts)));
-      changes.appliedTypes.push(type);
+      // The latency SLI is what people wait for. An event recovered by deep
+      // reconciliation was already minutes late at the vendor and counts as
+      // "missed by the normal path" instead; timing its bulk re-read would
+      // page someone for a delay nobody saw.
+      if (!isReconciliation) changes.appliedTypes.push(type);
       const op = changes.byOperator.get(charger.operatorId) ?? { sites: new Set<string>(), kinds: new Set<ChangeKind>() };
       op.sites.add(charger.siteId);
       op.kinds.add(kindOfEvent(type));

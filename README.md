@@ -65,7 +65,7 @@ The brief asks for "real ingestion working … one correct, useful aggregate". I
 | 429 / 500 / malformed | `src/ingest/poller.ts`, `src/ingest/processor.ts` | 429: honour `Retry-After` and resume from the same cursor. 500: jittered retries, then give up without advancing the high-water mark. Malformed: quarantine per event |
 | `docker compose up` | `docker-compose.yml` | One command, ordered by health and completion conditions |
 | IaC | `infra/terraform` | Applied to LocalStack by the `terraform` service |
-| Tests at failure modes | `test/` | 82 tests, listed below, plus the alert rules under `promtool` |
+| Tests at failure modes | `test/` | 86 tests, listed below, plus the alert rules under `promtool` |
 | Coordinates as they arrive | `src/geo/geocoder.ts` | Addresses only → override, cache, postal fallback; precision recorded; unresolved sites kept off the map |
 
 ### The stub scenario, end to end
@@ -107,6 +107,7 @@ Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) ru
 - **Webhook endpoint:** a bad signature stores nothing; a good one is acknowledged after the write.
 - **Nearest-available:** geodesic distance within 0.5% of haversine; faulted, stale and ungeocoded sites skipped with reasons; never another tenant's chargers.
 - **Geocoding:** a manual pin beats every later step; the postal fallback says it is approximate (±2 km); an address that can't be placed returns nothing instead of a guess, with the reason (no postal code, or a postal code we don't cover).
+- **Latency SLI:** receipt → committed times only events people wait for; an event recovered by deep reconciliation (already minutes late at the vendor) counts as "missed" instead, in both Prometheus and `/v1/freshness`. Reconciliation is staggered: sites that started together still reconcile across the hour, each once per period.
 - **Push:** a committed change is announced once, and re-reads or bad payloads announce nothing; each stream gets only its own operator's changes while staff get all; no token, no stream; reported render times feed the tile verdict, which says "measuring" below 1,000 samples; malformed or flooding reports are refused.
 - **Live simulator:** registers never fall and power never exceeds the charger; readings every 10 s; sessions bill plausibly; the same run however often it is advanced; `since` and the cursor are honoured; meter values never go by webhook and batches are held 5–60 s; the pilot sites get byte-identical responses with live mode on or off; a site polled again within 30 s gets 429.
 - **Long-running volume:** the ingestion log and vendor-call view show the newest rows and count all of them, the pilot log stays intact, and the scripted 429 and 500 stay in view.
@@ -388,7 +389,7 @@ The full list with what changes if each is wrong is in [docs/03](docs/03-questio
   - Three synthetic sites cannot be placed on purpose: two have no postal code, and S-IN-0029 (Chennai) has a postal code outside the postal-code list. Each shows its reason on the dashboard.
 - **The fake vendor** (`src/fake-csms`) serves the stub payloads in a fixed script and pushes the signed webhooks. It is test tooling, not part of GridWatch.
   - **Live mode** (on by default, `LIVE_SIM=off` to turn it off) simulates the generated sites from a seed, within the vendor contract: a reading every 10 s while charging, served by poll only; status, session and fault events also by webhook, batched and held up to 60 s, shuffled, sometimes delivered twice or with a broken event; 1% of events only appear 2–5 minutes late; random 500s on 2% of polls. The pilot sites are never touched, so the stub scenario and its 16 outcomes are the same with it on or off.
-  - The poller re-reads 90 s behind its high-water mark in the demo (`POLL_OVERLAP_SEC`), so each reading is fetched about twice, not ten times; the hourly reconciliation catches the late ones.
+  - The poller re-reads 90 s behind its high-water mark in the demo (`POLL_OVERLAP_SEC`), so each reading is fetched about twice, not ten times; the hourly reconciliation catches the late ones; each site reconciles at its own minute of the hour, so the re-reads never arrive all at once.
 - **Sample tariffs** (`seed/tariffs.json`, `is_sample = true`): Acme ₹18.00/kWh + ₹25, Stadtwerke €0.59/kWh + €0.49, excluding tax.
 - **Hand-entered coordinates.** Coordinates: none come from Cidroy's data. 3 site pins and 21 postal-code centres were entered by hand as approximate stand-ins for an operations pin, a geocoder cache and a postal dataset. They are not verified positions. The dashboard labels them "(demo value)" and says the same under the map.
 - **Polling interval.** The demo polls idle sites every 60 s so the scenario finishes quickly; production would use 2–5 min.
@@ -445,7 +446,7 @@ docker compose exec api node dist/bin/mint-token.js acme-charge
 ```
 
 ## Where I stopped, and what's next
-**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 82 tests passing.
+**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 86 tests passing.
 
 **Next, in priority order:**
 1. **Swap the inbox for Kafka** (D7). Put `processRow` behind a consumer and test rebalances and the offset-rewind runbook after a database failover. Load-test to 20k events/s to check the sizing in Part A §10.

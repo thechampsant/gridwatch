@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Clock } from '../clock.js';
 import type { CsmsClient, PageResult } from '../csms/client.js';
 import { metrics } from '../observability/metrics.js';
@@ -42,6 +42,23 @@ export function nextPollDelaySec(o: { active: boolean; consecutiveFailures: numb
   return Math.max(opts.minIntervalSec, o.active ? opts.activeIntervalSec : opts.idleIntervalSec);
 }
 
+// Deep reconciliation re-reads hours of data, so it must not happen for every
+// site at once. Each site gets a fixed phase within the period, from a hash of
+// its ID, and reconciles when the clock passes that phase. Sites that started
+// together (after a deploy or a restart) still spread across the hour.
+export function reconcilePhaseSec(siteId: string, everySec: number): number {
+  return createHash('sha256').update(siteId).digest().readUInt32BE(0) % everySec;
+}
+
+export function reconcileDue(siteId: string, lastReconciledAt: Date | null, now: Date, everySec: number): boolean {
+  if (lastReconciledAt === null) return true;
+  const phaseMs = reconcilePhaseSec(siteId, everySec) * 1000;
+  const periodMs = everySec * 1000;
+  // The first phase boundary after the last reconciliation.
+  const next = (Math.floor((lastReconciledAt.getTime() - phaseMs) / periodMs) + 1) * periodMs + phaseMs;
+  return now.getTime() >= next;
+}
+
 // "Full jitter" exponential backoff: spreads retries so a struggling vendor
 // isn't hit by synchronised bursts.
 export function backoffMs(attempt: number, opts: PollerOptions, random: () => number): number {
@@ -55,9 +72,7 @@ export async function pollSite(deps: PollerDeps, site: SiteLease): Promise<Cycle
   const now = clock.now();
   const addSec = (d: Date, s: number) => new Date(d.getTime() + s * 1000);
 
-  const reconcile =
-    site.highWaterMark !== null &&
-    (site.lastReconciledAt === null || now.getTime() - site.lastReconciledAt.getTime() > opts.reconcileEverySec * 1000);
+  const reconcile = site.highWaterMark !== null && reconcileDue(site.siteId, site.lastReconciledAt, now, opts.reconcileEverySec);
 
   // Resume a pagination interrupted by a 429, otherwise start from the
   // high-water mark minus the overlap window (duplicates are harmless,
