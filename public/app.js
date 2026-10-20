@@ -255,7 +255,8 @@ function renderTiles(status, sessions) {
   const day = latestBillingDay(sessions);
   const ofDay = sessions.filter((s) => s.business_date === day || (!s.business_date && s.stopped_at?.slice(0, 10) === day));
   const billed = ofDay.filter((s) => s.billing_status === 'charged');
-  const held = sessions.filter((s) => s.billing_status === 'needs_review');
+  const held = ofDay.filter((s) => s.billing_status === 'needs_review');
+  const heldEarlier = sessions.filter((s) => s.billing_status === 'needs_review').length - held.length;
   const totals = {};
   for (const s of billed) totals[s.currency] = (totals[s.currency] ?? 0) + Number(s.total_amount);
   const money = Object.entries(totals).map(([cur, v]) => fmtMoney(v, cur)).join(' + ') || fmtMoney(0, PERSONAS[state.persona].meta.includes('EUR') ? 'EUR' : 'INR');
@@ -266,7 +267,7 @@ function renderTiles(status, sessions) {
     tile('Connectors free', fmtNum(count('Available')), `of ${fmtNum(conns.length)}`, `${fmtNum(count('Charging'))} charging · ${fmtNum(count('Faulted'))} with a fault · ${fmtNum(count('Unknown'))} no data`) +
     tile('Charging now', fmtNum(charging.length), charging.length === 1 ? 'car' : 'cars', `${fmtNum(kw)} kW being delivered right now`) +
     tile('Sites needing attention', fmtNum(problemSites), `of ${fmtNum(sites.length)}`, `${bySite('Faulted')} with a fault · ${bySite('Attention')} need a look · ${bySite('Stale')} no recent data`) +
-    tile(day ? `Billed for ${fmtDay(day)}` : 'Billing', money, '', `${billed.length} session${billed.length === 1 ? '' : 's'} billed · ${held.length} held for review`);
+    tile(day ? `Billed for ${fmtDay(day)}` : 'Billing', money, '', `${billed.length} session${billed.length === 1 ? '' : 's'} billed · ${held.length} held for review${heldEarlier ? ` · ${heldEarlier} more held from earlier days` : ''}`);
 }
 
 // One line per site (its worst problem), so a site with many faulty
@@ -793,14 +794,14 @@ async function savePin(siteId, lngLat) {
 function renderFailures(status, sessions, statements, events, adminData) {
   const sites = visibleSites(status);
   const held = (reason) => String(sessions.filter((s) => s.review_reason === reason).length);
-  const calls = adminData?.calls ?? null;
-  const q = adminData?.quarantine ?? null;
+  const callCounts = adminData?.callCounts ?? null;
+  const qCounts = adminData?.quarantineCounts ?? null;
   const ADMIN = 'GridWatch admin only';
-  const callCount = (pred) => (calls ? String(calls.filter(pred).length) : ADMIN);
-  const qCount = (reasons) => (q ? String(q.filter((x) => reasons.includes(x.reason)).length) : ADMIN);
+  const callCount = (key) => (callCounts ? String(callCounts[key] ?? 0) : ADMIN);
+  const qCount = (reasons) => (qCounts ? String(reasons.reduce((n, r) => n + (qCounts[r] ?? 0), 0)) : ADMIN);
   const rows = [
-    ['Network says "too many requests" (429)', 'Waits as long as the vendor asks (Retry-After) and resumes from the same page; no burst of retries', callCount((c) => c.status_code === 429), 'Vendor calls (admin)'],
-    ['Network error or timeout (500)', 'Retries the same request up to 3 times with jittered backoff; if it keeps failing, tries again later without skipping any data', callCount((c) => c.direction === 'poll' && (c.status_code === null || c.status_code >= 500)), 'Vendor calls (admin)'],
+    ['Network says "too many requests" (429)', 'Waits as long as the vendor asks (Retry-After) and resumes from the same page; no burst of retries', callCount('rateLimited'), 'Vendor calls (admin)'],
+    ['Network error or timeout (500)', 'Retries the same request up to 3 times with jittered backoff; if it keeps failing, tries again later without skipping any data', callCount('pollFailed'), 'Vendor calls (admin)'],
     ['Broken record inside a batch', 'Sets that one record aside with the reason; the rest of the batch is still used', String(events.counts.quarantined ?? 0), 'Ingestion log'],
     ['Same update delivered twice', 'Recognised and ignored, so nothing is counted or billed twice', String(events.counts.duplicate ?? 0), 'Ingestion log'],
     ['Updates arrive out of order', 'The newest event wins by its own timestamp, not by arrival time', String(events.counts.stale ?? 0), 'Ingestion log'],
@@ -811,7 +812,7 @@ function renderFailures(status, sessions, statements, events, adminData) {
     ['Address cannot be placed at all', 'Kept off the map, still monitored and billed, listed with the reason until operations pins it', String(sites.filter((s) => s.geocode.status !== 'resolved').length), 'Site locations'],
     ['No recent update from a site', 'Shown as "No recent data"; never recommended as a free charger', String(sites.filter((s) => s.stale).length), 'Map, Sites'],
     ["Charger unknown, or from another operator's feed", 'Rejected and set aside; never shown to the wrong operator', qCount(['unknown_charger', 'connection_mismatch', 'site_mismatch', 'unknown_connector']), 'Set-aside records (admin)'],
-    ['Webhook with a bad signature', 'Rejected (401); nothing is stored', callCount((c) => c.outcome === 'bad_signature'), 'Vendor calls (admin)'],
+    ['Webhook with a bad signature', 'Rejected (401); nothing is stored', callCount('badSignature'), 'Vendor calls (admin)'],
     ['Day not finished, or data still arriving', "The daily statement waits until every site has reported past the operator's local midnight", statements.length ? `${statements.length} issued` : 'waiting', 'Sessions and billing'],
   ];
   $('failures').innerHTML =
@@ -1069,14 +1070,15 @@ function renderAdmin(adminData) {
   $('not-admin').hidden = isAdmin;
   if (!isAdmin || !adminData) return;
   const { calls, quarantine } = adminData;
-  const interesting = calls.filter((c) => c.status_code !== 200 || /S-IN-0007|S-DE-0003|S-IN-0012/.test(c.request) || c.direction === 'webhook');
-  $('calls').innerHTML = interesting
-    .slice(0, 40)
-    .map((c) => {
-      const tone = c.status_code >= 500 || c.status_code === 401 ? ['#B0302A', '#FBE9E7'] : c.status_code === 429 ? ['#7A4A00', '#FCF0DC'] : ['#176B5B', '#E1F2EE'];
-      return `<div class="call"><div class="req">${esc(c.request)}</div>${pill(c.status_code ?? 'timeout', tone[0], tone[1])}<div class="how">${esc(c.handling)}</div></div>`;
-    })
-    .join('');
+  const row = (c) => {
+    const tone = c.status_code >= 500 || c.status_code === 401 ? ['#B0302A', '#FBE9E7'] : c.status_code === 429 ? ['#7A4A00', '#FCF0DC'] : ['#176B5B', '#E1F2EE'];
+    return `<div class="call"><div class="req">${esc(c.request)}</div>${pill(c.status_code ?? 'timeout', tone[0], tone[1])}<div class="how">${esc(c.handling)}</div></div>`;
+  };
+  const k = calls.counts;
+  $('calls').innerHTML =
+    `<div class="small muted">${fmtNum(k.total)} calls so far · ${fmtNum(k.rateLimited)} rate-limited · ${fmtNum(k.pollFailed)} failed polls · ${fmtNum(k.badSignature)} bad signatures. The pilot sites' calls from the start come first (the scripted stub cases), then the latest errors anywhere.</div>` +
+    calls.notable.slice(0, 40).map(row).join('') +
+    (calls.recentErrors.length ? `<h3>Latest vendor errors</h3>${calls.recentErrors.slice(0, 10).map(row).join('')}` : '');
   $('quarantine').innerHTML = quarantine.length
     ? quarantine
         .map((x) => `<div class="call"><div class="req">${esc(JSON.stringify(x.payload ?? {}))}</div>${pill(x.reason, '#B0302A', '#FBE9E7')}<div class="how">${esc(x.detail ?? '')}</div></div>`)
@@ -1094,7 +1096,7 @@ async function refresh() {
       api(`/v1/sessions?include_synthetic=${state.showSynthetic}`),
       api(`/v1/settlement/statements`),
       api('/v1/ingestion/events'),
-      api('/v1/freshness'),
+      api(`/v1/freshness?include_synthetic=${state.showSynthetic}`),
       // The review queue on its own, so a busy network can't push it out of the newest 200.
       api(`/v1/sessions?status=needs_review&include_synthetic=${state.showSynthetic}`),
     ]);
@@ -1102,7 +1104,12 @@ async function refresh() {
     // Vendor calls and set-aside records are admin-only; operators get 403, so don't ask.
     const adminData =
       state.persona === 'platform_admin'
-        ? await Promise.all([api('/v1/admin/csms-calls'), api('/v1/admin/quarantine')]).then(([c, q]) => ({ calls: c.calls, quarantine: q.quarantine }))
+        ? await Promise.all([api('/v1/admin/csms-calls'), api(`/v1/admin/quarantine?include_synthetic=${state.showSynthetic}`)]).then(([c, q]) => ({
+            calls: c,
+            callCounts: c.counts,
+            quarantine: q.quarantine,
+            quarantineCounts: q.counts,
+          }))
         : null;
     state.lastStatus = status;
     state.lastSessions = sessions.sessions;

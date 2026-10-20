@@ -241,8 +241,9 @@ async function recordOutcome(
   await c.query(
     `INSERT INTO ingest_outcomes (inbox_id, event_index, operator_id, site_id, source, delivery_ref, event_type, summary,
                                   charger_id, connector_id, event_ts_local, event_ts, outcome, reason, received_at,
-                                  server_time)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                                  server_time, synthetic)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+             coalesce((SELECT synthetic FROM sites WHERE site_id = $4), false))
      ON CONFLICT (inbox_id, event_index) DO NOTHING`,
     [
       row.inbox_id,

@@ -136,7 +136,16 @@ services:
       PORT: "8090"
       WEBHOOK_URL: http://api:8080/webhooks/csms/csms-main
       WEBHOOK_HMAC_SECRET: ${WEBHOOK_HMAC_SECRET:-dev-only-webhook-secret}
-      FAKE_ERROR_RATE: ${FAKE_ERROR_RATE:-0}
+      # A live network on the 47 generated sites (the 3 pilot sites keep the
+      # scripted stub scenario). LIVE_SIM=off gives the replay alone.
+      LIVE_SIM: ${LIVE_SIM:-on}
+      LIVE_SEED: ${LIVE_SEED:-1}
+      LIVE_DUPLICATE_RATE: "0.05"
+      LIVE_MALFORMED_RATE: "0.02"
+      LIVE_LATE_RATE: "0.01"
+      # Random 500s, generated sites only. Low enough that the poller's
+      # circuit breaker never opens and stalls the pilot sites.
+      FAKE_ERROR_RATE: ${FAKE_ERROR_RATE:-0.02}
     ports:
       - "8090:8090"
     healthcheck:
@@ -158,6 +167,10 @@ services:
       # The demo shortens the idle interval so the scripted scenario finishes in about a minute.
       POLL_ACTIVE_INTERVAL_SEC: "30"
       POLL_IDLE_INTERVAL_SEC: "60"
+      # Re-read 90 s behind the high-water mark: covers the vendor's ordinary
+      # lateness without fetching every reading ten times. The hourly
+      # reconciliation catches the rare event that arrives later still.
+      POLL_OVERLAP_SEC: "90"
     depends_on:
       migrate:
         condition: service_completed_successfully

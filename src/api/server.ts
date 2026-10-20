@@ -382,26 +382,40 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { date, statements: rows.rows };
   });
 
+  // The newest events (shown oldest first), with counts over all of them, so
+  // a long-running network never freezes the log.
   app.get('/v1/ingestion/events', async (req) => {
     const q = req.query as Record<string, string | undefined>;
     const limit = Math.min(Math.max(Number(q.limit ?? 200) || 200, 1), 1000);
     const includeSynthetic = q.include_synthetic === 'true';
-    const rows = await run(req, (c) =>
-      c.query(
-        `SELECT o.outcome_id, o.operator_id, o.site_id, o.source, o.delivery_ref, o.event_type, o.summary,
-                o.charger_id, o.connector_id, o.event_ts_local, o.event_ts, o.outcome, o.reason, o.received_at,
-                o.server_time, o.processed_at
-           FROM ingest_outcomes o
-           LEFT JOIN sites s ON s.site_id = o.site_id
-          WHERE $1 OR NOT coalesce(s.synthetic, false)
-          ORDER BY o.outcome_id
-          LIMIT $2`,
-        [includeSynthetic, limit],
-      ),
+    const [rows, totals] = await run(req, (c) =>
+      Promise.all([
+        c.query(
+          `SELECT * FROM (
+             SELECT o.outcome_id, o.operator_id, o.site_id, o.source, o.delivery_ref, o.event_type, o.summary,
+                    o.charger_id, o.connector_id, o.event_ts_local, o.event_ts, o.outcome, o.reason, o.received_at,
+                    o.server_time, o.processed_at
+               FROM ingest_outcomes o
+              WHERE $1 OR NOT o.synthetic
+              ORDER BY o.outcome_id DESC
+              LIMIT $2) newest
+           ORDER BY outcome_id`,
+          [includeSynthetic, limit],
+        ),
+        c.query<{ outcome: string; n: number }>(
+          `SELECT outcome, count(*)::int AS n FROM ingest_outcomes WHERE $1 OR NOT synthetic GROUP BY outcome`,
+          [includeSynthetic],
+        ),
+      ]),
     );
     const counts: Record<string, number> = { applied: 0, stale: 0, duplicate: 0, quarantined: 0, held: 0 };
-    for (const r of rows.rows) counts[r.outcome] = (counts[r.outcome] ?? 0) + 1;
-    return { counts, events: rows.rows.map((r) => ({ ...r, sourceLabel: sourceLabel(r.source, r.delivery_ref, r.site_id) })) };
+    for (const r of totals.rows) counts[r.outcome] = r.n;
+    return {
+      counts,
+      shown: rows.rows.length,
+      total: totals.rows.reduce((n, r) => n + r.n, 0),
+      events: rows.rows.map((r) => ({ ...r, sourceLabel: sourceLabel(r.source, r.delivery_ref, r.site_id) })),
+    };
   });
 
   app.get('/v1/freshness', async (req) => {
@@ -413,17 +427,55 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/v1/admin/csms-calls', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send({ error: 'platform admins only' });
-    const rows = await run(req, (c) => c.query(`SELECT * FROM csms_calls ORDER BY call_id LIMIT 500`));
-    return { calls: rows.rows };
+    // Counts cover every call. "notable" is the pilot sites' traffic from the
+    // start (where the scripted 429 and 500 are); "recentErrors" the newest
+    // failures anywhere; "calls" the newest of everything.
+    const [counts, notable, recentErrors, calls] = await run(req, (c) =>
+      Promise.all([
+        c.query<{ total: number; rate_limited: number; poll_failed: number; bad_signature: number }>(
+          `SELECT count(*)::int AS total,
+                  count(*) FILTER (WHERE status_code = 429)::int AS rate_limited,
+                  count(*) FILTER (WHERE direction = 'poll' AND (status_code IS NULL OR status_code >= 500))::int AS poll_failed,
+                  count(*) FILTER (WHERE outcome = 'bad_signature')::int AS bad_signature
+             FROM csms_calls`,
+        ),
+        c.query(
+          `SELECT k.* FROM csms_calls k LEFT JOIN sites s ON s.site_id = k.site_id
+            WHERE (k.site_id IS NOT NULL AND NOT coalesce(s.synthetic, false))
+               OR (k.site_id IS NULL AND k.request NOT LIKE '%dlv-live-%')
+            ORDER BY k.call_id LIMIT 60`,
+        ),
+        c.query(`SELECT * FROM csms_calls WHERE status_code IS DISTINCT FROM 200 AND status_code IS DISTINCT FROM 202 ORDER BY call_id DESC LIMIT 20`),
+        c.query(`SELECT * FROM csms_calls ORDER BY call_id DESC LIMIT 200`),
+      ]),
+    );
+    const k = counts.rows[0]!;
+    return {
+      counts: { total: k.total, rateLimited: k.rate_limited, pollFailed: k.poll_failed, badSignature: k.bad_signature },
+      notable: notable.rows,
+      recentErrors: recentErrors.rows,
+      calls: calls.rows,
+    };
   });
 
   app.get('/v1/admin/quarantine', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send({ error: 'platform admins only' });
-    const rows = await run(req, (c) =>
-      c.query(`SELECT quarantine_id, inbox_id, event_index, operator_id, reason, detail, payload, created_at
-                 FROM quarantine ORDER BY quarantine_id DESC LIMIT 200`),
+    const includeSynthetic = (req.query as Record<string, string | undefined>).include_synthetic === 'true';
+    const [rows, counts] = await run(req, (c) =>
+      Promise.all([
+        c.query(
+          `SELECT q.quarantine_id, q.inbox_id, q.event_index, q.operator_id, q.reason, q.detail, q.payload, q.created_at
+             FROM quarantine q
+             LEFT JOIN chargers ch ON ch.charger_id = q.payload->>'charger_id'
+             LEFT JOIN sites s ON s.site_id = ch.site_id
+            WHERE $1 OR NOT coalesce(s.synthetic, false)
+            ORDER BY q.quarantine_id DESC LIMIT 200`,
+          [includeSynthetic],
+        ),
+        c.query<{ reason: string; n: number }>(`SELECT reason, count(*)::int AS n FROM quarantine GROUP BY reason`),
+      ]),
     );
-    return { quarantine: rows.rows };
+    return { counts: Object.fromEntries(counts.rows.map((r) => [r.reason, r.n])), quarantine: rows.rows };
   });
 
   // The human step of the geocoding loop: operations pins a site whose address

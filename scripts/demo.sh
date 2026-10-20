@@ -83,7 +83,8 @@ d.signals.forEach(s => console.log(" ", s.signal.padEnd(32), ("target " + s.targ
 title "Vendor calls (platform admin): 429, 500 and how they were handled"
 curl -sf -H "authorization: Bearer $ADMIN" "$API/v1/admin/csms-calls" | js '
 const d = JSON.parse(require("fs").readFileSync(0));
-d.calls.filter(c => /S-IN-0007|S-DE-0003|webhook/.test(c.request + c.direction)).slice(0, 12).forEach(c =>
+console.log("  " + d.counts.total + " calls so far, " + d.counts.rateLimited + " rate-limited, " + d.counts.pollFailed + " failed polls");
+d.notable.filter(c => /S-IN-0007|S-DE-0003|webhook/.test(c.request + c.direction)).slice(0, 12).forEach(c =>
   console.log(" ", String(c.status_code ?? "-").padEnd(4), c.request.slice(0, 70).padEnd(71), c.handling.slice(0, 80)));'
 
 title "Infrastructure provisioned by Terraform in LocalStack"

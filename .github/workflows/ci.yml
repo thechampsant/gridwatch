@@ -29,6 +29,12 @@ jobs:
         env:
           TEST_DATABASE_ADMIN_URL: postgres://postgres:gridwatch@localhost:55432/postgres
 
+  alert-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD/ops/prometheus:/rules" --entrypoint promtool prom/prometheus:v3.5.0 test rules /rules/rules.test.yml
+
   compose-smoke:
     runs-on: ubuntu-latest
     steps:

@@ -11,14 +11,16 @@ groups:
       - record: gridwatch:source_lag_seconds:p99_5m
         expr: histogram_quantile(0.99, sum by (le, source, type) (rate(gridwatch_source_lag_seconds_bucket[5m])))
       # Share of events slower than 1 s (bucket le="1") = error ratio for the platform SLO.
+      # Written as slow / all, so with no traffic it is 0/0 = NaN and never
+      # fires: an idle pipeline is not a slow one.
       - record: gridwatch:pipeline_slow_ratio:rate5m
         expr: |
-          1 - (sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[5m]))
-               / clamp_min(sum(rate(gridwatch_pipeline_latency_seconds_count[5m])), 1e-9))
+          (sum(rate(gridwatch_pipeline_latency_seconds_count[5m])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[5m])))
+            / sum(rate(gridwatch_pipeline_latency_seconds_count[5m]))
       - record: gridwatch:pipeline_slow_ratio:rate1h
         expr: |
-          1 - (sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[1h]))
-               / clamp_min(sum(rate(gridwatch_pipeline_latency_seconds_count[1h])), 1e-9))
+          (sum(rate(gridwatch_pipeline_latency_seconds_count[1h])) - sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[1h])))
+            / sum(rate(gridwatch_pipeline_latency_seconds_count[1h]))
 
       # Multi-window burn rate for a 99.9% objective (error budget 0.1%):
       # page when the budget burns 14.4x too fast over both 5 m and 1 h.

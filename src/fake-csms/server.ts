@@ -4,6 +4,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { signBody } from '../csms/signature.js';
 import { formatOffsetIso } from '../util/time.js';
+import { LiveSim, type LiveBatch, type LiveOptions } from './live.js';
 
 // A trivial stand-in for the vendor CSMS, built only from the stub payloads
 // and the pilot catalogue. It is not part of GridWatch. It replays the stub
@@ -17,18 +18,23 @@ import { formatOffsetIso } from '../util/time.js';
 //              out-of-order batch), signed, redelivered until acknowledged
 //   S-IN-0012  after the webhooks -> GroundFailure fault from the pilot sample
 //   synthetic  poll #1 -> a deterministic status snapshot for every connector
+//              (or, in live mode, a live network: see live.ts)
 //   any site   polled again within 30 s -> real 429 with Retry-After
 //
-// Afterwards every poll returns an empty page with the current server_time.
+// Afterwards every pilot poll returns an empty page with the current
+// server_time. Live mode never touches the three pilot sites, so the stub
+// scenario plays out exactly the same with it on or off.
 
 export interface FakeOptions {
   fixturesDir: string;
   seedDir: string;
   webhookUrl: string | null;
   webhookSecret: string;
-  errorRate: number; // extra random 500s, 0 for the deterministic demo
+  errorRate: number; // random 500s on generated sites only; the pilot sites stay scripted
   minIntervalSec: number;
+  live?: Omit<LiveOptions, 'bootMs'> | null;
   logger?: boolean;
+  now?: () => number; // for tests
 }
 
 interface SiteMeta {
@@ -45,6 +51,9 @@ function hash01(s: string): number {
   return createHash('sha256').update(s).digest().readUInt32BE(0) / 2 ** 32;
 }
 
+const MAX_QUEUED_BATCHES = 200;
+const MAX_IN_FLIGHT = 4;
+
 export function buildFakeCsms(o: FakeOptions) {
   const fixture = (name: string) => JSON.parse(readFileSync(path.join(o.fixturesDir, name), 'utf8'));
   const pilot = JSON.parse(readFileSync(path.join(o.seedDir, 'pilot-sample-data.json'), 'utf8'));
@@ -60,23 +69,32 @@ export function buildFakeCsms(o: FakeOptions) {
     sites.get(ch.site_id)?.chargers.push({ chargerId: ch.charger_id, maxKw: ch.max_kw, connectors: ch.connectors });
   }
 
+  const clock = o.now ?? (() => Date.now());
+  const live = o.live
+    ? new LiveSim(
+        [...sites.values()].filter((s) => s.synthetic),
+        { ...o.live, bootMs: clock() },
+      )
+    : null;
+
   const lastPoll = new Map<string, number>();
   const polls = new Map<string, number>();
   const script = { s7Page2Served: false, de1eServed: false, webhooksDone: false, s12FaultServed: false, s7PolledAfter429: false };
 
   const app: FastifyInstance = Fastify({ logger: o.logger ?? false });
-  app.get('/healthz', async () => ({ ok: true, script }));
+  app.get('/healthz', async () => ({ ok: true, script, live: live ? { bootId: live.bootId, ...live.stats } : null }));
 
   app.get('/v1/chargers', async (req, reply) => {
     const q = req.query as Record<string, string | undefined>;
     const site = q.site_id ? sites.get(q.site_id) : undefined;
     if (!site) return reply.code(q.site_id ? 404 : 400).send({ error: 'unknown or missing site_id' });
-    const now = new Date();
+    const now = new Date(clock());
     const serverTime = formatOffsetIso(now, site.timezone);
     const empty = () => ({ site_id: site.siteId, server_time: serverTime, events: [] as unknown[] });
 
     // Pagination: cursor requests continue the current poll and aren't rate limited.
     if (q.cursor) {
+      if (site.synthetic && live) return live.page(site.siteId, { cursor: q.cursor }, now.getTime()) ?? reply.code(400).send({ error: 'bad cursor' });
       if (site.siteId === 'S-IN-0007' && q.cursor === STUB_CURSOR) {
         script.s7Page2Served = true;
         return fixture('1b-poll-page2-final.json');
@@ -91,6 +109,16 @@ export function buildFakeCsms(o: FakeOptions) {
       return reply.code(429).send({ error: 'rate_limited', retry_after_seconds: wait });
     }
 
+    // Random failures only on generated sites, and before the scripted poll
+    // counter, so they can never knock the pilot scenario off its script.
+    if (site.synthetic && o.errorRate > 0 && Math.random() < o.errorRate) {
+      return reply.code(500).send({ error: 'internal', request_id: `req-${Math.random().toString(16).slice(2, 8)}` });
+    }
+    if (site.synthetic && live) {
+      lastPoll.set(site.siteId, now.getTime());
+      return live.page(site.siteId, { since: q.since }, now.getTime());
+    }
+
     const n = (polls.get(site.siteId) ?? 0) + 1;
     polls.set(site.siteId, n);
 
@@ -100,10 +128,6 @@ export function buildFakeCsms(o: FakeOptions) {
       reply.header('retry-after', '30');
       return reply.code(429).send(fixture('1c-rate-limited.json'));
     }
-    if (o.errorRate > 0 && Math.random() < o.errorRate) {
-      return reply.code(500).send({ error: 'internal', request_id: `req-${Math.random().toString(16).slice(2, 8)}` });
-    }
-
     lastPoll.set(site.siteId, now.getTime());
     if (site.siteId === 'S-IN-0007' && n === 1) return fixture('1a-poll-page1.json');
     if (site.siteId === 'S-IN-0007' && n >= 3) script.s7PolledAfter429 = true;
@@ -149,9 +173,47 @@ export function buildFakeCsms(o: FakeOptions) {
       await deliver(fixture(f));
     }
     script.webhooksDone = true;
+    startLiveWebhooks();
   }
 
-  return { app, runWebhookScript, script };
+  // Live webhooks are best effort, as the vendor's are: a few retries, then
+  // the batch is dropped (the poll still carries every event). Capped, so a
+  // receiver outage can't grow memory without bound.
+  const queue: LiveBatch[] = [];
+  let inFlight = 0;
+  let timer: NodeJS.Timeout | null = null;
+  function startLiveWebhooks(): void {
+    if (!live || !o.webhookUrl || timer) return;
+    live.startWebhooks(clock());
+    timer = setInterval(() => {
+      queue.push(...live.dueBatches(clock()));
+      while (queue.length > MAX_QUEUED_BATCHES) app.log.warn(`dropping live batch ${queue.shift()!.deliveryId}: receiver is behind`);
+      while (inFlight < MAX_IN_FLIGHT && queue.length) {
+        const b = queue.shift()!;
+        inFlight++;
+        void deliverBestEffort(b).finally(() => inFlight--);
+      }
+    }, 1000);
+  }
+  async function deliverBestEffort(b: LiveBatch): Promise<void> {
+    const body = JSON.stringify(b.body);
+    const signature = signBody(body, o.webhookSecret);
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        const res = await fetch(o.webhookUrl!, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csms-signature': signature }, body });
+        if (res.ok) return;
+      } catch {
+        /* retried below */
+      }
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+    }
+    app.log.warn(`gave up on live batch ${b.deliveryId}`);
+  }
+  app.addHook('onClose', async () => {
+    if (timer) clearInterval(timer);
+  });
+
+  return { app, runWebhookScript, script, live };
 }
 
 // Deterministic "current status" for a synthetic site's connectors, so the map

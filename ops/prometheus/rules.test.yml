@@ -1,0 +1,44 @@
+# promtool test rules ops/prometheus/rules.test.yml
+# The burn-rate alert must fire on a slow pipeline and stay silent on an idle one.
+rule_files:
+  - rules.yml
+evaluation_interval: 1m
+tests:
+  - name: idle pipeline does not page
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_pipeline_latency_seconds_count'
+        values: '0x120'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: FreshnessBudgetBurnFast
+        exp_alerts: []
+
+  - name: healthy pipeline does not page
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_pipeline_latency_seconds_count'
+        values: '0+100x120'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1"}'
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: FreshnessBudgetBurnFast
+        exp_alerts: []
+
+  - name: 10% of events slower than 1 s pages
+    interval: 1m
+    input_series:
+      - series: 'gridwatch_pipeline_latency_seconds_count'
+        values: '0+100x120'
+      - series: 'gridwatch_pipeline_latency_seconds_bucket{le="1"}'
+        values: '0+90x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: FreshnessBudgetBurnFast
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "Platform freshness SLO burning fast (receipt -> committed > 1 s)"
