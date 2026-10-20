@@ -20,7 +20,7 @@ export const KPIS = [
     targetSec: 10,
     percentile: 'P99.9',
     eventTypes: ['meter_value'],
-    vendorFloor: 'Meter values arrive only by poll, at most every 30 s, and keep ageing until the next poll.',
+    vendorFloor: 'Chargers read power about every 10 s, but readings reach us only by poll, at most every 30 s per site, so the newest can be up to ~40 s old.',
     verdict: 'missed_at_source',
   },
   {

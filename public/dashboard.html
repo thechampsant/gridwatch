@@ -111,7 +111,7 @@
     <section class="card" aria-labelledby="how-h">
       <h2 id="how-h">How the data gets to this screen</h2>
       <ol class="steps">
-        <li><b>The charging network reports in.</b> Each operator's charger-management system (the vendor) sends status changes in batches up to a minute apart. Power readings come only when we ask, at most every 30 seconds per site.</li>
+        <li><b>The charging network reports in.</b> Each operator's charger-management system (the vendor) sends status changes in batches up to a minute apart. Each charger takes a power reading about every 10 seconds, but the vendor lets us collect them at most every 30 seconds per site. So they arrive about three at a time: we keep every reading, and the newest can be up to about 40 seconds old.</li>
         <li><b>Every update is checked.</b> Repeats are ignored, an older update never overwrites a newer one, and a broken record is set aside without losing the rest of its batch.</li>
         <li><b>It is stored per operator.</b> One operator can never see another's data; the database itself enforces it.</li>
         <li><b>It reaches the screen in about a second.</b> Most of the delay you see comes before the data reaches us. The panels below show both parts separately.</li>
