@@ -21,7 +21,7 @@ This document is about decisions and why. Where something in the brief can't be 
 13. Sessions and settlement
 14. Analytics, alerts, forecasting
 15. Decision log
-16. What I would not build
+16. What not to build
 17. Delivery plan and team
 
 ---
@@ -83,7 +83,7 @@ Five decisions shape everything else:
 | A10 | Region-wide outage is a DR event outside the 99.9% SLA | RPO/RTO targets (§9) |
 | A11 | Peak about 2,000 concurrent dashboard users across tenants | API and push sizing |
 
-**Questions I would send the client** (full list: [03-questions-and-assumptions.md](03-questions-and-assumptions.md)). The ones that change the design:
+**Questions for the client** (full list: [03-questions-and-assumptions.md](03-questions-and-assumptions.md)). The ones that change the design:
 1. Is each freshness KPI measured from the charger event, the vendor send, or our receipt?
 2. Can the vendor shorten webhook batching and send meter values by webhook?
 3. Is GridWatch's settlement the legal invoice or a reconciliation ledger?
@@ -380,7 +380,7 @@ The vendor contract imposes a floor that comes **before** any GridWatch code run
 | Dashboard tile end-to-end | < 2 s P99.9 | n/a (from receipt) | ≤ 1.5 s | **Yes**, if measured from receipt | Push architecture (§3); tiles from live state, never ad-hoc SQL |
 | Map live-status update | < 10 s P95 | If batching is uniform over 0–60 s, P95 ≈ 57 s | ≤ 1.5 s | **No** end-to-end; **yes** from receipt | Same |
 
-**What I would put in front of the client:**
+**What to put in front of the client:**
 1. Define each KPI as **receipt to screen**, which we control, and commit to it with evidence.
 2. Report **vendor lag** per tenant as a separate, contractual-information metric, so a breach caused by the vendor's batching is visibly theirs.
 3. Negotiate the vendor feed: no batching for status and faults, meter values on the webhook, or a streaming option. Each of those changes the floor, not our architecture.
@@ -670,7 +670,7 @@ The slice ships the first layer: `gridwatch_source_lag_seconds`, `gridwatch_pipe
 
 ---
 
-## 16. What I would not build, and why
+## 16. What not to build, and why
 
 | Not building | Why |
 |---|---|

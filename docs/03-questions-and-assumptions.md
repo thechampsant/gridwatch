@@ -1,6 +1,6 @@
 # Questions for the client and assumptions made
 
-The brief invites either a sharp question or a defensible assumption. These are the questions I would send, each with the assumption I built on while waiting for an answer.
+The brief invites either a sharp question or a defensible assumption. These are the questions for the client, each with the assumption the design and the slice use while waiting for an answer.
 
 | # | Question | Assumption used | What changes if the answer differs |
 |---|---|---|---|

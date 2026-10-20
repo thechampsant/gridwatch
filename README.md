@@ -2,7 +2,7 @@
 
 | Part | Where | What it is |
 |---|---|---|
-| **A** | [docs/01-architecture.md](docs/01-architecture.md) | Architecture and design for 50k chargers / 12k sites in India and Germany: data flow, storage, GIS, freshness, HA/DR, sizing, security, observability, decision log, what I would not build |
+| **A** | [docs/01-architecture.md](docs/01-architecture.md) | Architecture and design for 50k chargers / 12k sites in India and Germany: data flow, storage, GIS, freshness, HA/DR, sizing, security, observability, decision log, what not to build |
 | **B** | [docs/02-architecture-review.md](docs/02-architecture-review.md) | Review of the draft architecture, ranked by severity, with fixes and sign-off questions |
 | **C** | this repository | A runnable slice of the riskiest path: vendor CSMS → normalise → store → live status, nearest-available and daily settlement, correct under duplicates, reordering, malformed data and meter resets |
 | — | [docs/03-questions-and-assumptions.md](docs/03-questions-and-assumptions.md) | Questions for the client, the assumptions made meanwhile, and data-quality findings in the provided stubs |
@@ -54,7 +54,7 @@ docker compose down -v
 
 ## What the slice proves
 
-The brief asks for "real ingestion working … one correct, useful aggregate". I built the part most likely to sink the project: **correctness and freshness accounting under the vendor's delivery semantics**, plus the map's hardest query.
+The brief asks for "real ingestion working … one correct, useful aggregate". The slice builds the part most likely to sink the project: **correctness and freshness accounting under the vendor's delivery semantics**, plus the map's hardest query.
 
 | Brief requirement | Where | Evidence |
 |---|---|---|
@@ -444,15 +444,3 @@ Get a token outside the dashboard:
 ```bash
 docker compose exec api node dist/bin/mint-token.js acme-charge
 ```
-
-## Where I stopped, and what's next
-**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 86 tests passing.
-
-**Next, in priority order:**
-1. **Swap the inbox for Kafka** (D7). Put `processRow` behind a consumer and test rebalances and the offset-rewind runbook after a database failover. Load-test to 20k events/s to check the sizing in Part A §10.
-2. **Push at production scale.** The slice pushes over Server-Sent Events from one Postgres LISTEN per API process and measures receipt → render from the browser. Production moves this to Kafka → Redis live state → a WebSocket gateway, sends deltas applied as MapLibre `feature-state` instead of refetching, and keeps the same browser-reported measurement.
-3. **Telemetry rollups.** Continuous aggregates with `counter_agg` (reset-aware energy) and `state_agg` (utilisation), and an integer `connector_key` instead of text IDs in hypertables.
-4. **Density and coverage, production version.** The slice computes H3 density and supply-only gaps per request. Production adds admin boundary polygons in `site_regions` (mapped at geocode time, with India's official boundaries), cells materialised at geocode time, a demand layer (population, traffic) to rank gaps, and vector tiles via Martin.
-5. **Settlement operations.** Scheduled per-operator runs after local midnight, a reviewer role in Keycloak (so not every operator user can bill), credit notes for corrections after invoicing, and re-rating when a tariff changes. The exceptions queue itself is built.
-6. **Soak and scale with the simulator.** It runs the 47 generated sites live; next is a profile at production size (12k sites) against the Kafka path, run for days, with the SLO alerts wired to Alertmanager.
-7. **Production IaC.** The Terraform module pointed at real AWS with an S3 state backend and locking, plus managed Postgres (Multi-AZ), MSK and ElastiCache modules for one regional cell.
