@@ -29,7 +29,14 @@ export interface SiteView {
   address: string;
   timezone: string;
   synthetic: boolean;
-  geocode: { status: string; precision: string | null; source: string | null; lat: number | null; lng: number | null };
+  geocode: {
+    status: string;
+    precision: string | null;
+    source: string | null;
+    note: string | null;
+    lat: number | null;
+    lng: number | null;
+  };
   lastContact: { at: string | null; via: string | null; ageSec: number | null };
   stale: boolean;
   rollup: Rollup;
@@ -46,6 +53,7 @@ export interface SiteRow {
   geocode_status: string;
   geocode_precision: string | null;
   geocode_source: string | null;
+  geocode_note: string | null;
   lat: number | null;
   lng: number | null;
   poll_contact_at: Date | null;
@@ -75,7 +83,7 @@ export async function loadSiteViews(c: Client, asOf: Date, staleAfterSec: number
   const sites = (
     await c.query<SiteRow>(
       `SELECT s.site_id, s.operator_id, s.name, s.address, s.timezone, s.synthetic,
-              s.geocode_status, s.geocode_precision, s.geocode_source,
+              s.geocode_status, s.geocode_precision, s.geocode_source, s.geocode_note,
               ST_Y(s.location::geometry) AS lat, ST_X(s.location::geometry) AS lng,
               ps.last_contact_at AS poll_contact_at
          FROM sites s LEFT JOIN poll_state ps ON ps.site_id = s.site_id
@@ -155,7 +163,14 @@ export function buildSiteViews(sites: SiteRow[], conns: ConnectorRow[], asOf: Da
       address: s.address,
       timezone: s.timezone,
       synthetic: s.synthetic,
-      geocode: { status: s.geocode_status, precision: s.geocode_precision, source: s.geocode_source, lat: s.lat, lng: s.lng },
+      geocode: {
+        status: s.geocode_status,
+        precision: s.geocode_precision,
+        source: s.geocode_source,
+        note: s.geocode_note,
+        lat: s.lat,
+        lng: s.lng,
+      },
       lastContact: { at: contactAt?.toISOString() ?? null, via, ageSec },
       stale,
       rollup,

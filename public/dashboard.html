@@ -55,7 +55,8 @@
           <div class="legend" id="legend"></div>
         </div>
         <div id="map" class="map" role="region" aria-label="Map of sites coloured by status"></div>
-        <p class="small muted">Each pin is placed from the site's address. A wide halo means the location is approximate. Click anywhere on the map to find the nearest free charger from that point.</p>
+        <p class="small" id="map-count"></p>
+        <p class="small muted">Each pin is worked out from the site's address. A wide halo means the location is approximate; a number means several sites share one approximate location. Click anywhere on the map to find the nearest free charger from that point. Pins here are approximate demo values entered by hand for this take-home; Cidroy's data has no coordinates.</p>
       </section>
 
       <section class="card attention-card" aria-labelledby="att-h">
@@ -63,6 +64,18 @@
         <ul class="attention" id="attention"></ul>
       </section>
     </div>
+
+    <section class="card" aria-labelledby="loc-h">
+      <div class="card-head">
+        <div>
+          <h2 id="loc-h">Site locations</h2>
+          <div class="small muted">The network sends addresses only, never coordinates. Every pin is worked out from the address, and this shows how sure we are, and what happens when we can't place a site.</div>
+        </div>
+        <div class="small" id="loc-count"></div>
+      </div>
+      <div id="pin-banner" class="panel small" hidden></div>
+      <div class="loc-grid" id="locations"></div>
+    </section>
 
     <div class="row">
       <section class="card sites-card" aria-labelledby="sites-h">
@@ -103,6 +116,14 @@
         <li><b>It is stored per operator.</b> One operator can never see another's data; the database itself enforces it.</li>
         <li><b>It reaches the screen in about a second.</b> Most of the delay you see comes before the data reaches us. The panels below show both parts separately.</li>
       </ol>
+    </section>
+
+    <section class="card" aria-labelledby="fail-h">
+      <div>
+        <h2 id="fail-h">Failure points and how they are handled</h2>
+        <div class="small muted">Each way the network feed or its data can go wrong, what GridWatch does about it, and how often it happened in this run.</div>
+      </div>
+      <div class="table-scroll"><table class="sessions" id="failures"></table></div>
     </section>
 
     <section class="card" aria-labelledby="fresh-h">

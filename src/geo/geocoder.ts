@@ -27,6 +27,7 @@ export interface GeocodeResult {
   precision: Precision;
   source: string;
   confidence: number;
+  note: string; // why the pin is where it is, in plain words, shown to operators
 }
 
 export interface GeocodeStep {
@@ -59,13 +60,21 @@ export function extractPostalCode(address: string, country: string): string | nu
   return all.at(-1) ?? null; // postal codes come at the end of these addresses
 }
 
+// Why no location could be found, for the review list.
+export function unresolvedReason(address: string, country: string): string {
+  const code = extractPostalCode(address, country);
+  return code ? `Postal code ${code} is not in the postal-code list` : 'No postal code in the address';
+}
+
 export class OverrideStep implements GeocodeStep {
   name = 'manual_override';
   constructor(private readonly c: Client) {}
   async geocode(input: GeocodeInput): Promise<GeocodeResult | null> {
-    const r = await this.c.query(`SELECT lat, lng, precision FROM geocode_overrides WHERE site_id = $1`, [input.siteId]);
+    const r = await this.c.query(`SELECT lat, lng, precision, note FROM geocode_overrides WHERE site_id = $1`, [input.siteId]);
     const row = r.rows[0];
-    return row ? { lat: row.lat, lng: row.lng, precision: row.precision, source: this.name, confidence: 1 } : null;
+    return row
+      ? { lat: row.lat, lng: row.lng, precision: row.precision, source: this.name, confidence: 1, note: `Pinned by operations: ${row.note}` }
+      : null;
   }
 }
 
@@ -78,7 +87,16 @@ export class CacheStep implements GeocodeStep {
       [normalizeAddress(input.address)],
     );
     const row = r.rows[0];
-    return row ? { lat: row.lat, lng: row.lng, precision: row.precision, source: row.source, confidence: row.confidence ?? 0.8 } : null;
+    return row
+      ? {
+          lat: row.lat,
+          lng: row.lng,
+          precision: row.precision,
+          source: row.source,
+          confidence: row.confidence ?? 0.8,
+          note: `Matched from the address at ${row.precision} level (${row.source})`,
+        }
+      : null;
   }
 }
 
@@ -100,7 +118,16 @@ export class PostalGazetteerStep implements GeocodeStep {
     const code = extractPostalCode(input.address, input.country);
     if (!code) return null;
     const e = this.index.get(`${input.country}:${code}`);
-    return e ? { lat: e.lat, lng: e.lng, precision: 'postal_code', source: this.name, confidence: 0.5 } : null;
+    return e
+      ? {
+          lat: e.lat,
+          lng: e.lng,
+          precision: 'postal_code',
+          source: this.name,
+          confidence: 0.5,
+          note: `Address matched only postal area ${code} (${e.place}); the pin is the area centre, about ±2 km`,
+        }
+      : null;
   }
 }
 
@@ -116,14 +143,20 @@ export async function geocodePendingSites(c: Client, steps: GeocodeStep[]): Prom
     if (r) {
       await c.query(
         `UPDATE sites SET location = ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, geocode_status = 'resolved',
-                geocode_precision = $4, geocode_source = $5, geocode_confidence = $6, geocoded_at = now()
+                geocode_precision = $4, geocode_source = $5, geocode_confidence = $6, geocode_note = $7, geocoded_at = now()
           WHERE site_id = $1`,
-        [s.site_id, r.lng, r.lat, r.precision, r.source, r.confidence],
+        [s.site_id, r.lng, r.lat, r.precision, r.source, r.confidence, r.note],
       );
       resolved += 1;
     } else {
-      await c.query(`UPDATE sites SET geocode_status = 'unresolved', geocoded_at = now() WHERE site_id = $1`, [s.site_id]);
-      unresolved.push(s.site_id);
+      // Not guessed: the site stays off the map, is still monitored and
+      // billed, and waits in the review list for a human pin.
+      const reason = unresolvedReason(s.address, s.country);
+      await c.query(`UPDATE sites SET geocode_status = 'unresolved', geocode_note = $2, geocoded_at = now() WHERE site_id = $1`, [
+        s.site_id,
+        reason,
+      ]);
+      unresolved.push(`${s.site_id} (${reason})`);
     }
   }
   return { resolved, unresolved };

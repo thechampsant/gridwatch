@@ -111,7 +111,8 @@ footer { padding: 12px 4px 24px; border-top: 1px solid var(--line); }
 .tabs button[aria-selected='true'] { color: var(--ink); border-bottom-color: var(--blue); }
 .tabs button:focus-visible, .att:focus-visible, .health:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .tab-body { display: flex; flex-direction: column; gap: 20px; }
-.tab-body[hidden] { display: none; }
+/* Classes that set display would otherwise override the hidden attribute. */
+[hidden] { display: none !important; }
 .tab-body > .card { flex: 0 0 auto; }
 
 /* Data-health chip in the page header */
@@ -137,6 +138,20 @@ footer { padding: 12px 4px 24px; border-top: 1px solid var(--line); }
 table.sessions { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 13px; }
 table.sessions th { text-align: left; background: var(--soft); font-size: 11px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 12px; }
 table.sessions td { padding: 10px 12px; border-top: 1px solid var(--line-2); vertical-align: top; }
+
+/* Site locations */
+.loc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 24px; }
+.loc-col h3 { margin: 0 0 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.loc-col .count { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--grey-bg); color: var(--ink-2); }
+.loc-row { display: flex; flex-direction: column; gap: 3px; padding: 10px 0; border-top: 1px solid var(--line-2); }
+.loc-line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 6px 0; border-top: 1px solid var(--line-2); }
+.loc-line > :last-child { white-space: nowrap; text-align: right; }
+.pin-btn { align-self: flex-start; min-height: 36px; margin-top: 4px; padding: 6px 12px; border: 1px solid var(--blue); border-radius: 8px; background: #fff; color: var(--blue); font-weight: 600; cursor: pointer; }
+.pin-btn[aria-pressed='true'] { background: var(--blue); color: #fff; }
+.link-btn { border: 0; background: transparent; color: var(--blue); font-weight: 600; cursor: pointer; padding: 0 4px; min-height: 32px; }
+.group-pin { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; color: #fff; font: 600 13px 'IBM Plex Sans', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 1px rgba(22, 24, 29, 0.35); cursor: pointer; padding: 0; }
+.map.pinning { outline: 3px solid var(--blue); }
+.map.pinning .maplibregl-canvas { cursor: crosshair; }
 
 /* How it works */
 .steps { margin: 0; padding-left: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 24px; }

@@ -79,11 +79,21 @@ const faultName = (code) => FAULTS[code] ?? String(code).replace(/([a-z])([A-Z])
 const chargerName = (id) => `Charger ${String(id).split('-').pop()}`;
 const plugName = (c) => `${chargerName(c.chargerId)}, connector ${c.connectorId}`;
 
+const isApproximate = (geo) => geo.precision === 'postal_code' || geo.precision === 'city';
+
 function locationLabel(geo) {
   if (geo.status !== 'resolved') return 'Location missing: not on the map';
-  if (geo.source === 'manual_override') return 'Location verified';
-  if (geo.precision === 'postal_code' || geo.precision === 'city') return 'Approximate location (postal area)';
-  return 'Location from address';
+  // Pins entered by hand for this take-home say so; Cidroy's data has no coordinates.
+  const demo = /demo value/.test(`${geo.source ?? ''} ${geo.note ?? ''}`) ? ' (demo value)' : '';
+  if (geo.source === 'manual_override') return `Location verified${demo}`;
+  if (isApproximate(geo)) return 'Approximate location (postal area)';
+  return `Location from address${demo}`;
+}
+
+// "Address matched only postal area 201301 (Noida); ..." -> "201301 Noida"
+function postalArea(note) {
+  const m = /postal area (\d+) \(([^)]+)\)/.exec(note ?? '');
+  return m ? `${m[1]} ${m[2]}` : 'an unknown area';
 }
 
 // ---- Formatting -----------------------------------------------------------
@@ -140,6 +150,10 @@ const state = {
   mapReady: false,
   fitted: false,
   sites: new Map(),
+  groupMarkers: new Map(), // "lng,lat" -> { el, marker, list } for sites sharing one approximate point
+  pinning: null, // site ID an admin is placing on the map
+  pinMessage: null,
+  lastStatus: null,
 };
 
 function readPref(key, fallback) {
@@ -171,6 +185,17 @@ async function api(path) {
   const r = await fetch(path, { headers: { authorization: `Bearer ${state.token}` } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
+}
+
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${state.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+  return data;
 }
 
 // ---- Chrome: personas, tabs, header --------------------------------------
@@ -279,7 +304,14 @@ function renderAttention(status, sessions) {
   }
   const unplaced = visibleSites(status).filter((s) => s.geocode.status !== 'resolved');
   if (unplaced.length) {
-    items.push({ rank: 5, synthetic: false, name: '', site: unplaced[0].siteId, text: `<b>${unplaced.length} site${unplaced.length === 1 ? '' : 's'}</b> can't be shown on the map: the address couldn't be located` });
+    const reasons = [...new Set(unplaced.map((s) => (s.geocode.note ?? "the address couldn't be located").toLowerCase()))].join('; ');
+    items.push({
+      rank: 5,
+      synthetic: false,
+      name: '',
+      target: 'loc-h',
+      text: `<b>${unplaced.length} site${unplaced.length === 1 ? '' : 's'}</b> can't be shown on the map (${esc(reasons)})`,
+    });
   }
   // Worst first; within a level, real pilot sites before generated demo sites.
   items.sort((a, b) => a.rank - b.rank || Number(a.synthetic) - Number(b.synthetic) || a.name.localeCompare(b.name));
@@ -362,13 +394,16 @@ function initMap() {
   // The container's size settles after fonts, layout and tab switches; keep the canvas in step.
   new ResizeObserver(() => map.resize()).observe($('map'));
   map.on('load', () => {
-    map.addSource('sites', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    // 'all' feeds the approximate-area halos; 'singles' the pins of sites that
+    // have a point to themselves. Sites sharing one point get a count marker.
+    map.addSource('all', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addSource('singles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addSource('point', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     const color = ['match', ['get', 'rollup'], 'Healthy', ROLLUP.Healthy.color, 'Attention', ROLLUP.Attention.color, 'Faulted', ROLLUP.Faulted.color, ROLLUP.Stale.color];
     map.addLayer({
       id: 'halo',
       type: 'circle',
-      source: 'sites',
+      source: 'all',
       paint: {
         'circle-radius': ['match', ['get', 'geocodePrecision'], ...Object.entries(PRECISION_HALO).flat(), 8],
         'circle-color': color,
@@ -378,7 +413,7 @@ function initMap() {
     map.addLayer({
       id: 'sites',
       type: 'circle',
-      source: 'sites',
+      source: 'singles',
       paint: { 'circle-radius': 7, 'circle-color': color, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 },
     });
     map.addLayer({
@@ -399,6 +434,11 @@ function initMap() {
       highlightSite(p.siteId, false);
     });
     map.on('click', (e) => {
+      if (e.originalEvent?.target?.closest?.('.group-pin')) return;
+      if (state.pinning) {
+        void savePin(state.pinning, e.lngLat);
+        return;
+      }
       if (map.queryRenderedFeatures(e.point, { layers: ['sites'] }).length) return;
       state.point = { key: null, name: 'the point you clicked', lat: e.lngLat.lat, lng: e.lngLat.lng };
       void loadNearest();
@@ -415,13 +455,58 @@ function renderMap(geo) {
   const features = geo.features.filter((f) => state.showSynthetic || !f.properties.synthetic);
   const counts = {};
   for (const f of features) counts[f.properties.rollup] = (counts[f.properties.rollup] ?? 0) + 1;
-  const unplaced = geo.unresolved.length;
+  const unplaced = geo.unresolved.filter((u) => state.showSynthetic || !state.sites.get(u.siteId)?.synthetic).length;
   $('legend').innerHTML =
     Object.entries(ROLLUP)
       .map(([k, r]) => `<span><span class="dot" style="background:${r.color}"></span>${esc(r.label)} ${counts[k] ?? 0}</span>`)
       .join('') + (unplaced ? `<span>${unplaced} not on the map</span>` : '');
+
+  // Sites geocoded to the same postal-area centre share one exact point. Show
+  // them honestly as one marker with a count, not spread out as if we knew better.
+  const byPoint = new Map();
+  for (const f of features) {
+    const k = f.geometry.coordinates.join(',');
+    if (!byPoint.has(k)) byPoint.set(k, []);
+    byPoint.get(k).push(f);
+  }
+  const singles = [];
+  const groups = [];
+  for (const [k, list] of byPoint) (list.length === 1 ? singles.push(list[0]) : groups.push({ k, list }));
+  const shared = groups.reduce((a, g) => a + g.list.length, 0);
+  $('map-count').innerHTML =
+    `<b>${features.length + unplaced} sites</b> · ${features.length} on the map · ${unplaced} without a location` +
+    (groups.length ? ` · ${shared} of them share ${groups.length} approximate point${groups.length === 1 ? '' : 's'} (shown with a number)` : '');
+
   if (!state.mapReady) return;
-  state.map.getSource('sites').setData({ type: 'FeatureCollection', features });
+  state.map.getSource('all').setData({ type: 'FeatureCollection', features });
+  state.map.getSource('singles').setData({ type: 'FeatureCollection', features: singles });
+  const seen = new Set();
+  for (const g of groups) {
+    seen.add(g.k);
+    let m = state.groupMarkers.get(g.k);
+    if (!m) {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'group-pin';
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openGroupPopup(g.k);
+      });
+      m = { el, marker: new maplibregl.Marker({ element: el }).setLngLat(g.list[0].geometry.coordinates).addTo(state.map), list: g.list };
+      state.groupMarkers.set(g.k, m);
+    }
+    m.list = g.list;
+    const worst = g.list.map((f) => f.properties.rollup).sort((a, b) => ROLLUP_ORDER[a] - ROLLUP_ORDER[b])[0];
+    m.el.textContent = String(g.list.length);
+    m.el.style.background = ROLLUP[worst].color;
+    m.el.setAttribute('aria-label', `${g.list.length} sites share this approximate location. Show them.`);
+  }
+  for (const [k, m] of state.groupMarkers) {
+    if (!seen.has(k)) {
+      m.marker.remove();
+      state.groupMarkers.delete(k);
+    }
+  }
   if (!state.fitted && features.length) {
     const b = new maplibregl.LngLatBounds();
     for (const f of features) b.extend(f.geometry.coordinates);
@@ -429,6 +514,19 @@ function renderMap(geo) {
     state.fitted = true;
   }
   renderSearchPoint();
+}
+
+function openGroupPopup(k) {
+  const m = state.groupMarkers.get(k);
+  if (!m) return;
+  const first = state.sites.get(m.list[0].properties.siteId);
+  const rows = m.list
+    .map((f) => `${esc(f.properties.name)} · ${esc(ROLLUP[f.properties.rollup]?.label ?? f.properties.rollup)} · ${esc(f.properties.connectorsAvailable)} of ${esc(f.properties.connectorsTotal)} free`)
+    .join('<br>');
+  new maplibregl.Popup()
+    .setLngLat(m.list[0].geometry.coordinates)
+    .setHTML(`<b>${m.list.length} sites share postal area ${esc(postalArea(first?.geocode.note))}</b><br><span class="muted">Exact positions unknown: the addresses matched only the postal area.</span><br>${rows}`)
+    .addTo(state.map);
 }
 
 function renderSearchPoint() {
@@ -450,6 +548,108 @@ function highlightSite(siteId, fly = true) {
     card.classList.add('highlight');
     card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
+}
+
+// The geocoding loop made visible: what we could place, how sure we are, and
+// what happens to the sites we couldn't place (still monitored, waiting for a pin).
+function renderLocations(status) {
+  const sites = visibleSites(status);
+  const missing = sites.filter((s) => s.geocode.status !== 'resolved');
+  const approx = sites.filter((s) => s.geocode.status === 'resolved' && isApproximate(s.geocode));
+  const exact = sites.filter((s) => s.geocode.status === 'resolved' && !isApproximate(s.geocode));
+  const isAdmin = state.persona === 'platform_admin';
+  $('loc-count').innerHTML = `<b>${sites.length} sites</b> · ${sites.length - missing.length} on the map · ${missing.length} without a location`;
+
+  const missingHtml = missing.length
+    ? missing
+        .map(
+          (s) =>
+            `<div class="loc-row"><div><b>${esc(s.name)}</b> <span class="site-id">${esc(s.siteId)}</span></div><div class="small muted">${esc(s.address)}</div><div class="small"><b>Why:</b> ${esc(s.geocode.note ?? "The address couldn't be located")}</div><div class="small" style="color:var(--ink-2)">Still monitored and billed. Left out of the map and of find-a-free-charger until it is pinned.</div>${
+              isAdmin
+                ? `<button type="button" class="pin-btn" data-pin="${esc(s.siteId)}" aria-pressed="${state.pinning === s.siteId}">${state.pinning === s.siteId ? 'Now click the map…' : 'Pin on map'}</button>`
+                : '<div class="small muted">Waiting for GridWatch operations to pin it.</div>'
+            }</div>`,
+        )
+        .join('')
+    : '<div class="small muted">Every site has a location.</div>';
+
+  const groups = {};
+  for (const s of approx) (groups[postalArea(s.geocode.note)] ??= []).push(s);
+  const areas = Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+  const approxHtml = approx.length
+    ? `<div class="small" style="color:var(--ink-2);padding-bottom:4px">Matched only to a postal area: the pin is the area centre, about ±2 km. Sites in the same area share one pin, and find-a-free-charger says "location approximate".</div>` +
+      areas
+        .slice(0, 8)
+        .map(([k, list]) => `<div class="loc-line"><span>Postal area ${esc(k)}</span><span class="muted">${list.length} site${list.length === 1 ? '' : 's'}</span></div>`)
+        .join('') +
+      (areas.length > 8 ? `<div class="small muted">and ${areas.length - 8} more areas</div>` : '')
+    : '<div class="small muted">None.</div>';
+
+  const exactHtml = exact.length
+    ? exact.map((s) => `<div class="loc-line"><span>${esc(s.name)}</span><span class="muted">${esc(locationLabel(s.geocode))}</span></div>`).join('')
+    : '<div class="small muted">None yet.</div>';
+
+  $('locations').innerHTML =
+    `<div class="loc-col"><h3>Not on the map <span class="count">${missing.length}</span></h3>${missingHtml}</div>` +
+    `<div class="loc-col"><h3>Approximate <span class="count">${approx.length}</span></h3>${approxHtml}</div>` +
+    `<div class="loc-col"><h3>Street level or pinned <span class="count">${exact.length}</span></h3>${exactHtml}</div>`;
+
+  const banner = $('pin-banner');
+  if (state.pinning) {
+    const s = state.sites.get(state.pinning);
+    banner.hidden = false;
+    banner.innerHTML = `Click the map where <b>${esc(s?.name ?? state.pinning)}</b> is. <button type="button" class="link-btn" data-pin-cancel>Cancel</button>`;
+  } else if (state.pinMessage) {
+    banner.hidden = false;
+    banner.innerHTML = esc(state.pinMessage);
+  } else {
+    banner.hidden = true;
+  }
+  if (state.mapReady) $('map').classList.toggle('pinning', !!state.pinning);
+}
+
+async function savePin(siteId, lngLat) {
+  const name = state.sites.get(siteId)?.name ?? siteId;
+  try {
+    // Six decimals is about 10 cm: more than a map click can mean.
+    const round = (x) => Math.round(x * 1e6) / 1e6;
+    await apiPost(`/v1/admin/sites/${encodeURIComponent(siteId)}/location`, { lat: round(lngLat.lat), lng: round(lngLat.lng) });
+    state.pinMessage = `Saved: ${name} is now on the map as "Location verified". The pin is a manual override and wins over any geocoder result from now on.`;
+  } catch (err) {
+    state.pinMessage = `Not saved: ${err.message}. Pick a point inside the site's country.`;
+  }
+  state.pinning = null;
+  await refresh();
+}
+
+function renderFailures(status, sessions, statements, events, adminData) {
+  const sites = visibleSites(status);
+  const held = (reason) => String(sessions.filter((s) => s.review_reason === reason).length);
+  const calls = adminData?.calls ?? null;
+  const q = adminData?.quarantine ?? null;
+  const ADMIN = 'GridWatch admin only';
+  const callCount = (pred) => (calls ? String(calls.filter(pred).length) : ADMIN);
+  const qCount = (reasons) => (q ? String(q.filter((x) => reasons.includes(x.reason)).length) : ADMIN);
+  const rows = [
+    ['Network says "too many requests" (429)', 'Waits as long as the vendor asks (Retry-After) and resumes from the same page; no burst of retries', callCount((c) => c.status_code === 429), 'Vendor calls (admin)'],
+    ['Network error or timeout (500)', 'Retries the same request up to 3 times with jittered backoff; if it keeps failing, tries again later without skipping any data', callCount((c) => c.direction === 'poll' && (c.status_code === null || c.status_code >= 500)), 'Vendor calls (admin)'],
+    ['Broken record inside a batch', 'Sets that one record aside with the reason; the rest of the batch is still used', String(events.counts.quarantined ?? 0), 'Ingestion log'],
+    ['Same update delivered twice', 'Recognised and ignored, so nothing is counted or billed twice', String(events.counts.duplicate ?? 0), 'Ingestion log'],
+    ['Updates arrive out of order', 'The newest event wins by its own timestamp, not by arrival time', String(events.counts.stale ?? 0), 'Ingestion log'],
+    ['Meter reset during a session', 'Rebuilt from interval readings when they allow it; otherwise held for review, never billed negative', held('meter_reset'), 'Sessions and billing'],
+    ['More energy than the charger can deliver', 'Held for review instead of invoiced', held('implausible_energy'), 'Sessions and billing'],
+    ['No coordinates in the feed (every site)', 'Placed from the address: verified pin, then geocoder, then postal-area centre, with how sure we are', `${sites.filter((s) => s.geocode.status === 'resolved').length} placed`, 'Site locations'],
+    ['Address places a site only approximately', 'Approximate pin with a halo; sites sharing a point show a count; flagged in find-a-free-charger', String(sites.filter((s) => s.geocode.status === 'resolved' && isApproximate(s.geocode)).length), 'Site locations, map'],
+    ['Address cannot be placed at all', 'Kept off the map, still monitored and billed, listed with the reason until operations pins it', String(sites.filter((s) => s.geocode.status !== 'resolved').length), 'Site locations'],
+    ['No recent update from a site', 'Shown as "No recent data"; never recommended as a free charger', String(sites.filter((s) => s.stale).length), 'Map, Sites'],
+    ["Charger unknown, or from another operator's feed", 'Rejected and set aside; never shown to the wrong operator', qCount(['unknown_charger', 'connection_mismatch', 'site_mismatch', 'unknown_connector']), 'Set-aside records (admin)'],
+    ['Webhook with a bad signature', 'Rejected (401); nothing is stored', callCount((c) => c.outcome === 'bad_signature'), 'Vendor calls (admin)'],
+    ['Day not finished, or data still arriving', "The daily statement waits until every site has reported past the operator's local midnight", statements.length ? `${statements.length} issued` : 'waiting', 'Sessions and billing'],
+  ];
+  $('failures').innerHTML =
+    '<thead><tr><th>Failure</th><th>What GridWatch does</th><th>This run</th><th>Where to see it</th></tr></thead><tbody>' +
+    rows.map(([f, what, n, where]) => `<tr><td><b>${esc(f)}</b></td><td>${esc(what)}</td><td class="mono">${esc(n)}</td><td>${esc(where)}</td></tr>`).join('') +
+    '</tbody>';
 }
 
 function plainSkip(reason) {
@@ -588,13 +788,13 @@ function renderLog(events) {
     '</tbody>';
 }
 
-async function renderAdmin() {
+function renderAdmin(adminData) {
   const isAdmin = state.persona === 'platform_admin';
   $('admin').hidden = !isAdmin;
   $('not-admin').hidden = isAdmin;
-  if (!isAdmin) return;
-  const [calls, q] = await Promise.all([api('/v1/admin/csms-calls'), api('/v1/admin/quarantine')]);
-  const interesting = calls.calls.filter((c) => c.status_code !== 200 || /S-IN-0007|S-DE-0003|S-IN-0012/.test(c.request) || c.direction === 'webhook');
+  if (!isAdmin || !adminData) return;
+  const { calls, quarantine } = adminData;
+  const interesting = calls.filter((c) => c.status_code !== 200 || /S-IN-0007|S-DE-0003|S-IN-0012/.test(c.request) || c.direction === 'webhook');
   $('calls').innerHTML = interesting
     .slice(0, 40)
     .map((c) => {
@@ -602,8 +802,8 @@ async function renderAdmin() {
       return `<div class="call"><div class="req">${esc(c.request)}</div>${pill(c.status_code ?? 'timeout', tone[0], tone[1])}<div class="how">${esc(c.handling)}</div></div>`;
     })
     .join('');
-  $('quarantine').innerHTML = q.quarantine.length
-    ? q.quarantine
+  $('quarantine').innerHTML = quarantine.length
+    ? quarantine
         .map((x) => `<div class="call"><div class="req">${esc(JSON.stringify(x.payload ?? {}))}</div>${pill(x.reason, '#B0302A', '#FBE9E7')}<div class="how">${esc(x.detail ?? '')}</div></div>`)
         .join('')
     : '<div class="small muted">Empty.</div>';
@@ -621,6 +821,12 @@ async function refresh() {
       api('/v1/ingestion/events'),
       api('/v1/freshness'),
     ]);
+    // Vendor calls and set-aside records are admin-only; operators get 403, so don't ask.
+    const adminData =
+      state.persona === 'platform_admin'
+        ? await Promise.all([api('/v1/admin/csms-calls'), api('/v1/admin/quarantine')]).then(([c, q]) => ({ calls: c.calls, quarantine: q.quarantine }))
+        : null;
+    state.lastStatus = status;
     $('error').hidden = true;
     $('updated').textContent = `Updated ${new Date(status.asOf).toLocaleTimeString()} · refreshes every 5 s`;
     renderHealth(fresh);
@@ -628,10 +834,12 @@ async function refresh() {
     renderSites(status);
     renderAttention(status, sessions.sessions);
     renderMap(geo);
+    renderLocations(status);
     renderSessions(sessions.sessions, statements.statements);
+    renderFailures(status, sessions.sessions, statements.statements, events, adminData);
     renderFreshness(fresh);
     renderLog(events);
-    await renderAdmin();
+    renderAdmin(adminData);
   } catch (err) {
     $('error').hidden = false;
     $('error').textContent = `Could not load data: ${err.message}`;
@@ -664,6 +872,19 @@ document.addEventListener('click', (e) => {
     const k = el('[data-point]').dataset.point;
     state.point = { key: k, ...POINTS[k] };
     void loadNearest();
+  }
+  if (el('[data-pin]')) {
+    const id = el('[data-pin]').dataset.pin;
+    state.pinning = state.pinning === id ? null : id;
+    state.pinMessage = null;
+    if (state.lastStatus) renderLocations(state.lastStatus);
+    if (state.pinning) $('map').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  if (el('[data-pin-cancel]')) {
+    state.pinning = null;
+    if (state.lastStatus) renderLocations(state.lastStatus);
+    return;
   }
   if (el('[data-site]')) highlightSite(el('[data-site]').dataset.site);
   if (el('[data-target]')) $(el('[data-target]').dataset.target)?.scrollIntoView({ behavior: 'smooth' });

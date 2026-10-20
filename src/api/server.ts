@@ -3,7 +3,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { SecretProvider } from '../archive/aws.js';
 import { parseAsOf, type Clock } from '../clock.js';
-import { withTenant, type Client, type Pool, type TenantContext } from '../db/pool.js';
+import { withTenant, withTx, type Client, type Pool, type TenantContext } from '../db/pool.js';
 import { registry } from '../observability/metrics.js';
 import { AuthError, issueToken, verifyToken } from './auth.js';
 import { freshnessReport } from './freshness.js';
@@ -138,6 +138,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           lastContactAgeSec: s.lastContact.ageSec,
           geocodePrecision: s.geocode.precision,
           geocodeSource: s.geocode.source,
+          geocodeNote: s.geocode.note,
           connectorsAvailable: availableConnectors(s).length,
           connectorsTotal: s.connectors.length,
           synthetic: s.synthetic,
@@ -145,7 +146,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       })),
       unresolved: sites
         .filter((s) => s.geocode.lat === null)
-        .map((s) => ({ siteId: s.siteId, name: s.name, address: s.address, geocodeStatus: s.geocode.status })),
+        .map((s) => ({ siteId: s.siteId, name: s.name, address: s.address, geocodeStatus: s.geocode.status, reason: s.geocode.note })),
     };
   });
 
@@ -304,6 +305,50 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { quarantine: rows.rows };
   });
 
+  // The human step of the geocoding loop: operations pins a site whose address
+  // couldn't be located (or was only approximate). The pin becomes a manual
+  // override, which wins over every geocoder result from then on.
+  app.post<{ Params: { siteId: string } }>('/v1/admin/sites/:siteId/location', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ error: 'platform admins only' });
+    const body = (req.body ?? {}) as { lat?: unknown; lng?: unknown; note?: unknown };
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return reply.code(400).send({ error: 'lat and lng are required' });
+    const site = (
+      await deps.ingestPool.query<{ site_id: string; country: string }>(`SELECT site_id, country FROM sites WHERE site_id = $1`, [
+        req.params.siteId,
+      ])
+    ).rows[0];
+    if (!site) return reply.code(404).send({ error: 'unknown site' });
+    const box = COUNTRY_BOUNDS[site.country];
+    if (!box || lat < box.minLat || lat > box.maxLat || lng < box.minLng || lng > box.maxLng) {
+      return reply.code(400).send({ error: `that point is outside ${site.country}; the pin was not saved` });
+    }
+    const note = typeof body.note === 'string' && body.note.trim() ? body.note.trim().slice(0, 200) : 'placed from the dashboard map';
+    await withTx(deps.ingestPool, async (c) => {
+      await c.query(
+        `INSERT INTO geocode_overrides (site_id, lat, lng, precision, note, created_by) VALUES ($1, $2, $3, 'rooftop', $4, $5)
+         ON CONFLICT (site_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng, precision = EXCLUDED.precision,
+                note = EXCLUDED.note, created_by = EXCLUDED.created_by, created_at = now()`,
+        [site.site_id, lat, lng, note, req.tenant!.subject],
+      );
+      await c.query(
+        `UPDATE sites SET location = ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, geocode_status = 'resolved',
+                geocode_precision = 'rooftop', geocode_source = 'manual_override', geocode_confidence = 1,
+                geocode_note = $4, geocoded_at = now()
+          WHERE site_id = $1`,
+        [site.site_id, lng, lat, `Pinned by operations: ${note}`],
+      );
+      await c.query(`INSERT INTO audit_log (subject, role, action, detail) VALUES ($1, $2, $3, $4)`, [
+        req.tenant!.subject,
+        req.tenant!.role,
+        'POST /v1/admin/sites/:siteId/location',
+        JSON.stringify({ siteId: site.site_id, lat, lng, note }),
+      ]);
+    });
+    return { siteId: site.site_id, lat, lng, note: `Pinned by operations: ${note}` };
+  });
+
   // DEMO ONLY: hands out tokens so the dashboard's "view as" switch works
   // without an identity provider. Not registered unless DEMO_MODE=true.
   if (deps.demoMode) {
@@ -341,6 +386,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   return app;
 }
+
+// Rough country boxes: enough to catch a pin dropped in the wrong country.
+const COUNTRY_BOUNDS: Record<string, { minLat: number; maxLat: number; minLng: number; maxLng: number }> = {
+  IN: { minLat: 6, maxLat: 37.5, minLng: 68, maxLng: 97.5 },
+  DE: { minLat: 47.2, maxLat: 55.1, minLng: 5.8, maxLng: 15.1 },
+};
 
 function sourceLabel(source: string, ref: string | null, siteId: string | null): string {
   if (source === 'webhook') return `Webhook ${ref ?? ''}`.trim();

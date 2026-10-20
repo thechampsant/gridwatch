@@ -325,7 +325,11 @@ Every site records `precision` (rooftop / street / landmark / postal_code / city
 - Unresolved sites stay off the map and out of nearest, and sit in a review queue.
 - A reverse check catches wrong results: the geocoded point must fall inside the expected country, state and postal polygon.
 
-The slice implements steps 1, 2 and 4 with demo data. Two synthetic sites have no postal code on purpose and stay unresolved.
+Every outcome also records a plain-language reason (`sites.geocode_note`), such as "Address matched only postal area 201301; the pin is the area centre, about ±2 km" or "Postal code 600002 is not in the postal-code list". Operators see it next to the site.
+
+The review queue closes the loop. A platform admin pins an unresolved site with `POST /v1/admin/sites/:siteId/location`. The point is checked against the site's country, stored as a manual override (so it wins over any later geocoder result) and audited. In production this is a staffed operations queue with a reverse check against the postal polygon.
+
+The slice implements steps 1, 2 and 4 with demo data. Three synthetic sites cannot be placed on purpose: two have no postal code, and one (S-IN-0029, Chennai) has a postal code outside the postal-code list. None of the coordinates come from Cidroy's data; they were entered by hand and are labelled as demo values.
 
 ### 7.2 Spatial queries
 - **Storage.** `geography(Point, 4326)` with a GiST index. Distances are geodesic metres, not degrees.

@@ -159,3 +159,49 @@ describe('nearest available charger', () => {
     expect(r.results.every((x: { siteId: string }) => x.siteId.startsWith('S-IN'))).toBe(true);
   });
 });
+
+describe('fixing a missing location (the human step of geocoding)', () => {
+  const pin = (siteId: string, body: unknown, token: string) =>
+    app.inject({
+      method: 'POST',
+      url: `/v1/admin/sites/${siteId}/location`,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      payload: JSON.stringify(body),
+    });
+
+  beforeEach(async () => {
+    await admin.query(
+      `UPDATE sites SET location = NULL, geocode_status = 'unresolved', geocode_precision = NULL, geocode_source = NULL,
+              geocode_note = 'No postal code in the address' WHERE site_id = 'S-IN-0012'`,
+    );
+  });
+
+  it('says why a site is missing from the map, while it is still monitored', async () => {
+    const map = (await get('/v1/map/sites', acme)).json();
+    expect(map.unresolved).toMatchObject([{ siteId: 'S-IN-0012', reason: 'No postal code in the address' }]);
+    const site = (await get('/v1/sites/status', acme)).json().sites.find((s: { siteId: string }) => s.siteId === 'S-IN-0012');
+    expect(site.connectors[0].status).toBe('Faulted'); // the ground fault is still tracked without coordinates
+  });
+
+  it('lets only platform admins pin a site', async () => {
+    expect((await pin('S-IN-0012', { lat: 12.9975, lng: 77.6963 }, acme)).statusCode).toBe(403);
+  });
+
+  it('refuses a pin dropped in the wrong country', async () => {
+    const r = await pin('S-IN-0012', { lat: 48.78, lng: 9.18 }, platform);
+    expect(r.statusCode).toBe(400);
+    const map = (await get('/v1/map/sites', acme)).json();
+    expect(map.unresolved.map((u: { siteId: string }) => u.siteId)).toEqual(['S-IN-0012']);
+  });
+
+  it('puts the site on the map as verified, and audits who did it', async () => {
+    const r = await pin('S-IN-0012', { lat: 12.9975, lng: 77.6963, note: 'checked on site' }, platform);
+    expect(r.statusCode).toBe(200);
+    const map = (await get('/v1/map/sites', acme)).json();
+    const f = map.features.find((x: { id: string }) => x.id === 'S-IN-0012');
+    expect(f.geometry.coordinates).toEqual([77.6963, 12.9975]);
+    expect(f.properties).toMatchObject({ geocodeSource: 'manual_override', geocodePrecision: 'rooftop', geocodeNote: 'Pinned by operations: checked on site' });
+    const audit = (await admin.query(`SELECT subject, detail FROM audit_log WHERE action LIKE 'POST /v1/admin/sites/%'`)).rows;
+    expect(audit).toMatchObject([{ subject: 't-admin', detail: { siteId: 'S-IN-0012', lat: 12.9975, lng: 77.6963 } }]);
+  });
+});

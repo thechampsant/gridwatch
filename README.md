@@ -26,6 +26,7 @@ The fake vendor plays the stub scenario in about a minute. Then:
 | Open | For |
 |---|---|
 | http://localhost:8080/dashboard | The dashboard on live data. **Operations** is the control room's view in plain language: free connectors, live charging, sites needing attention, the network map, a free-charger finder, and sessions with billing. **How it works** shows the evidence: data delay split into the vendor's share and ours, the per-event ingestion log, and (as GridWatch admin) vendor calls and set-aside records. Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
+| Missing coordinates, end to end | On **Operations**, the **Site locations** panel shows what could be placed, how exactly, and the three sites that could not, each with the reason. They are still monitored and billed but kept off the map and out of find-a-free-charger. Switch to **GridWatch admin**, press **Pin on map** on one of them (for example S-IN-0029 in Chennai), then click the map: the site appears as "Location verified", and the pin is audited. **How it works** opens with a table of every failure point, what GridWatch does about it, and how often it happened in this run |
 | `./scripts/demo.sh` | A terminal walkthrough: ingestion log, tenant isolation, nearest charger, sessions, settlement, freshness, vendor calls, infrastructure |
 | http://localhost:9090 | Prometheus: `gridwatch_pipeline_latency_seconds`, `gridwatch_source_lag_seconds`, `gridwatch:pipeline_latency_seconds:p999_5m`, alerts |
 
@@ -103,6 +104,8 @@ Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) ru
 - **Tenant isolation:** `?operator_id=` is ignored; admins see all tenants and operators get 403 on admin routes; forged tokens rejected; the database returns no rows when no tenant is set.
 - **Webhook endpoint:** a bad signature stores nothing; a good one is acknowledged after the write.
 - **Nearest-available:** geodesic distance within 0.5% of haversine; faulted, stale and ungeocoded sites skipped with reasons; never another tenant's chargers.
+- **Geocoding:** a manual pin beats every later step; the postal fallback says it is approximate (±2 km); an address that can't be placed returns nothing instead of a guess, with the reason (no postal code, or a postal code we don't cover).
+- **Fixing a missing location:** the reason appears in the map's unresolved list while the site's faults are still tracked; only platform admins can pin (operators get 403); a pin outside the site's country is refused (400); a valid pin puts the site on the map as verified and writes an audit row.
 
 ## Design summary
 Full detail is in [Part A](docs/01-architecture.md). In short:
@@ -147,10 +150,10 @@ The full list with what changes if each is wrong is in [docs/03](docs/03-questio
 - **Synthetic pilot.** The pilot data is a 3-site excerpt, and the "starter kit" it mentions wasn't provided. `scripts/generate-synthetic-pilot.mjs` deterministically expands it to the brief's 50 sites / 220 chargers.
   - Every generated site is marked `synthetic`.
   - Synthetic sites resolve to postal-code centroids, so several share a point. That is what "postal_code precision" looks like on a map.
-  - Two synthetic sites have no postal code on purpose and stay unresolved.
+  - Three synthetic sites cannot be placed on purpose: two have no postal code, and S-IN-0029 (Chennai) has a postal code outside the postal-code list. Each shows its reason on the dashboard.
 - **The fake vendor** (`src/fake-csms`) serves the stub payloads in a fixed script and pushes the signed webhooks. It is test tooling, not part of GridWatch.
 - **Sample tariffs** (`seed/tariffs.json`, `is_sample = true`): Acme ₹18.00/kWh + ₹25, Stadtwerke €0.59/kWh + €0.49, excluding tax.
-- **Hand-entered coordinates.** The geocode override and cache entries for the three real sites are approximate, standing in for the operations queue and a provider.
+- **Hand-entered coordinates.** Coordinates: none come from Cidroy's data. 3 site pins and 21 postal-code centres were entered by hand as approximate stand-ins for an operations pin, a geocoder cache and a postal dataset. They are not verified positions. The dashboard labels them "(demo value)" and says the same under the map.
 - **Polling interval.** The demo polls idle sites every 60 s so the scenario finishes quickly; production would use 2–5 min.
 - **LocalStack is pinned to 4.14.0,** the last release that runs without an account token.
 
@@ -190,6 +193,7 @@ All `/v1` routes need `Authorization: Bearer <JWT>`. The tenant comes from the t
 | `GET /v1/ingestion/events` | What happened to each event, and why |
 | `GET /v1/freshness` | Vendor age when served vs. platform latency per KPI |
 | `GET /v1/admin/csms-calls`, `GET /v1/admin/quarantine` | Platform admins only, audited |
+| `POST /v1/admin/sites/:siteId/location` | Platform admins only, audited: pin a site (`{lat, lng, note}`), checked against the site's country. Stored as a manual override, which wins over any geocoder result |
 | `GET /metrics`, `/healthz`, `/readyz` | Operations |
 
 Get a token outside the dashboard:
