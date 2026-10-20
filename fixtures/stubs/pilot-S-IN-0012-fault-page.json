@@ -1,0 +1,8 @@
+{
+  "_note": "Derived from the GroundFailure sample in pilot-sample-data.json, served by the fake CSMS as a poll page. server_time is chosen 5 s after the event.",
+  "site_id": "S-IN-0012",
+  "server_time": "2026-06-09T18:02:45+05:30",
+  "events": [
+    { "type": "fault", "charger_id": "C-IN-0012-A", "connector_id": "1", "code": "GroundFailure", "severity": "critical", "ts": "2026-06-09T18:02:40+05:30" }
+  ]
+}

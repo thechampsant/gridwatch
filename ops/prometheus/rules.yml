@@ -1,0 +1,47 @@
+# Freshness SLOs, split by who owns the latency.
+#   Platform (ours): receipt -> committed state, target P99.9 < 1 s, which
+#     leaves headroom inside the 2 s dashboard budget for push + render.
+#   Vendor (theirs): event time -> receipt, reported to the customer, not
+#     alerted on as our failure.
+groups:
+  - name: gridwatch-freshness
+    rules:
+      - record: gridwatch:pipeline_latency_seconds:p999_5m
+        expr: histogram_quantile(0.999, sum by (le) (rate(gridwatch_pipeline_latency_seconds_bucket[5m])))
+      - record: gridwatch:source_lag_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (le, source, type) (rate(gridwatch_source_lag_seconds_bucket[5m])))
+      # Share of events slower than 1 s (bucket le="1") = error ratio for the platform SLO.
+      - record: gridwatch:pipeline_slow_ratio:rate5m
+        expr: |
+          1 - (sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[5m]))
+               / clamp_min(sum(rate(gridwatch_pipeline_latency_seconds_count[5m])), 1e-9))
+      - record: gridwatch:pipeline_slow_ratio:rate1h
+        expr: |
+          1 - (sum(rate(gridwatch_pipeline_latency_seconds_bucket{le="1"}[1h]))
+               / clamp_min(sum(rate(gridwatch_pipeline_latency_seconds_count[1h])), 1e-9))
+
+      # Multi-window burn rate for a 99.9% objective (error budget 0.1%):
+      # page when the budget burns 14.4x too fast over both 5 m and 1 h.
+      - alert: FreshnessBudgetBurnFast
+        expr: gridwatch:pipeline_slow_ratio:rate5m > (14.4 * 0.001) and gridwatch:pipeline_slow_ratio:rate1h > (14.4 * 0.001)
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "Platform freshness SLO burning fast (receipt -> committed > 1 s)"
+
+      # Leading indicator: backlog grows before latency does.
+      - alert: InboxBacklogGrowing
+        expr: gridwatch_inbox_oldest_pending_age_seconds > 5
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Oldest unprocessed vendor payload is older than 5 s"
+
+      # Vendor-side: a whole feed going quiet is one incident, not 5,000
+      # "charger offline" alerts.
+      - alert: VendorPollFailing
+        expr: sum(rate(gridwatch_csms_requests_total{outcome=~"server_error|timeout|network_error"}[5m])) / clamp_min(sum(rate(gridwatch_csms_requests_total[5m])), 1e-9) > 0.2
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "More than 20% of vendor poll requests failing"

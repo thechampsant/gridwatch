@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.github
+docs
+infra
+ops
+*.md
+!README.md
+.env
+coverage

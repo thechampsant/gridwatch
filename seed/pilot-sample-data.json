@@ -1,0 +1,85 @@
+{
+  "_note": "Illustrative excerpt of the pilot dataset. The full 50-site / ~220-charger set is seeded into the mock Vendor CSMS in the starter kit. This sample shows the SHAPE and QUIRKS of the data exactly as the vendor CSMS exposes it. Read the field notes at the bottom.",
+  "operators": [
+    { "operator_id": "acme-charge", "name": "Acme Charge Pvt Ltd", "country": "IN" },
+    { "operator_id": "stadtwerke-ev", "name": "Stadtwerke EV GmbH", "country": "DE" }
+  ],
+  "sites": [
+    {
+      "site_id": "S-IN-0007",
+      "operator_id": "acme-charge",
+      "name": "Sector 18 Metro",
+      "address": "Sector 18 Metro Station, Gate 3, Noida, UP 201301",
+      "country": "IN"
+    },
+    {
+      "site_id": "S-IN-0012",
+      "operator_id": "acme-charge",
+      "name": "Phoenix Mall",
+      "address": "Phoenix Marketcity, Whitefield Rd, Mahadevapura, Bengaluru, KA 560048",
+      "country": "IN"
+    },
+    {
+      "site_id": "S-DE-0003",
+      "operator_id": "stadtwerke-ev",
+      "name": "Hauptbahnhof P2",
+      "address": "Ladestation Hauptbahnhof, Arnulf-Klett-Platz 2, 70173 Stuttgart",
+      "country": "DE"
+    }
+  ],
+  "chargers": [
+    { "charger_id": "C-IN-0007-A", "site_id": "S-IN-0007", "model": "DeltaDC-60", "max_kw": 60, "connectors": ["1", "2"] },
+    { "charger_id": "C-IN-0007-B", "site_id": "S-IN-0007", "model": "DeltaDC-60", "max_kw": 60, "connectors": ["1"] },
+    { "charger_id": "C-IN-0012-A", "site_id": "S-IN-0012", "model": "ABB-Terra-AC", "max_kw": 22, "connectors": ["1"] },
+    { "charger_id": "C-DE-0003-A", "site_id": "S-DE-0003", "model": "Alpitronic-HYC", "max_kw": 150, "connectors": ["1", "2"] }
+  ],
+  "telemetry_samples": [
+    {
+      "type": "status",
+      "charger_id": "C-IN-0007-A",
+      "connector_id": "1",
+      "status": "Charging",
+      "ts": "2026-06-09T14:32:11+05:30"
+    },
+    {
+      "type": "meter_value",
+      "charger_id": "C-IN-0007-A",
+      "connector_id": "1",
+      "energy_register_wh": 4821553,
+      "power_w": 41200,
+      "ts": "2026-06-09T14:32:11+05:30"
+    },
+    {
+      "type": "meter_value",
+      "charger_id": "C-IN-0007-A",
+      "connector_id": "1",
+      "energy_register_wh": 4821667,
+      "power_w": 41050,
+      "ts": "2026-06-09T14:32:21+05:30"
+    },
+    {
+      "type": "session",
+      "event": "session.stop",
+      "charger_id": "C-DE-0003-A",
+      "connector_id": "1",
+      "session_id": "sess-de-99x",
+      "start_meter_wh": 9930120,
+      "stop_meter_wh": 9971540,
+      "ts": "2026-06-09T23:14:58+02:00"
+    },
+    {
+      "type": "fault",
+      "charger_id": "C-IN-0012-A",
+      "connector_id": "1",
+      "code": "GroundFailure",
+      "severity": "critical",
+      "ts": "2026-06-09T18:02:40+05:30"
+    }
+  ],
+  "_field_notes": {
+    "coordinates": "Sites carry an address string and NO latitude/longitude. There is no coordinate field anywhere in the vendor feed.",
+    "energy_register_wh": "Cumulative LIFETIME energy register for the connector, in watt-hours. It only ever increases (until a meter reset/replacement). It is not per-session and not per-interval. To get session energy, you need start and stop register values; to get interval energy you difference consecutive readings — and you must handle resets.",
+    "timestamps": "ts is in the charger's LOCAL timezone with offset (+05:30 for India, +01:00/+02:00 for Germany depending on DST). They are not normalised.",
+    "delivery": "In the live mock CSMS, webhook events may arrive out of order, may be duplicated (at-least-once), and may be batched. The poll API enforces a 30s minimum interval and returns 429 if exceeded."
+  }
+}

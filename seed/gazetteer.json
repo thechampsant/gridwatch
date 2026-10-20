@@ -1,0 +1,26 @@
+{
+  "_note": "Offline postal-code gazetteer used as the last geocoding fallback. Coordinates are approximate area centroids, entered by hand for the pilot regions; precision is recorded as 'postal_code'. Production would load a licensed postal-centroid dataset.",
+  "entries": [
+    { "country": "IN", "postal_code": "110001", "place": "Connaught Place, New Delhi", "lat": 28.6315, "lng": 77.2167 },
+    { "country": "IN", "postal_code": "110017", "place": "Saket, New Delhi", "lat": 28.5245, "lng": 77.2066 },
+    { "country": "IN", "postal_code": "122002", "place": "DLF Phase 2, Gurugram", "lat": 28.4890, "lng": 77.0890 },
+    { "country": "IN", "postal_code": "201301", "place": "Noida", "lat": 28.5750, "lng": 77.3300 },
+    { "country": "IN", "postal_code": "560001", "place": "MG Road, Bengaluru", "lat": 12.9760, "lng": 77.6030 },
+    { "country": "IN", "postal_code": "560034", "place": "Koramangala, Bengaluru", "lat": 12.9350, "lng": 77.6240 },
+    { "country": "IN", "postal_code": "560048", "place": "Mahadevapura, Bengaluru", "lat": 12.9900, "lng": 77.6880 },
+    { "country": "IN", "postal_code": "560066", "place": "Whitefield, Bengaluru", "lat": 12.9700, "lng": 77.7500 },
+    { "country": "IN", "postal_code": "400001", "place": "Fort, Mumbai", "lat": 18.9330, "lng": 72.8350 },
+    { "country": "IN", "postal_code": "400051", "place": "Bandra East, Mumbai", "lat": 19.0600, "lng": 72.8500 },
+    { "country": "IN", "postal_code": "411001", "place": "Camp, Pune", "lat": 18.5150, "lng": 73.8780 },
+    { "country": "DE", "postal_code": "70173", "place": "Stuttgart-Mitte", "lat": 48.7780, "lng": 9.1800 },
+    { "country": "DE", "postal_code": "70174", "place": "Stuttgart-Mitte/Nord", "lat": 48.7850, "lng": 9.1720 },
+    { "country": "DE", "postal_code": "70176", "place": "Stuttgart-West", "lat": 48.7760, "lng": 9.1580 },
+    { "country": "DE", "postal_code": "70178", "place": "Stuttgart-Süd", "lat": 48.7650, "lng": 9.1650 },
+    { "country": "DE", "postal_code": "70190", "place": "Stuttgart-Ost", "lat": 48.7860, "lng": 9.2000 },
+    { "country": "DE", "postal_code": "70372", "place": "Bad Cannstatt", "lat": 48.8050, "lng": 9.2150 },
+    { "country": "DE", "postal_code": "70565", "place": "Stuttgart-Vaihingen", "lat": 48.7300, "lng": 9.1100 },
+    { "country": "DE", "postal_code": "71032", "place": "Böblingen", "lat": 48.6860, "lng": 9.0110 },
+    { "country": "DE", "postal_code": "71634", "place": "Ludwigsburg", "lat": 48.8950, "lng": 9.1920 },
+    { "country": "DE", "postal_code": "73728", "place": "Esslingen am Neckar", "lat": 48.7400, "lng": 9.3080 }
+  ]
+}

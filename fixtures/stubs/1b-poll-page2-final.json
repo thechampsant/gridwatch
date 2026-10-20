@@ -1,0 +1,7 @@
+{
+  "site_id": "S-IN-0007",
+  "server_time": "2026-06-09T14:32:25+05:30",
+  "events": [
+    { "type": "fault", "charger_id": "C-IN-0007-A", "connector_id": "2", "code": "OverTemperature", "severity": "warning", "ts": "2026-06-09T14:30:55+05:30" }
+  ]
+}

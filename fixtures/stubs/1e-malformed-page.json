@@ -1,0 +1,8 @@
+{
+  "site_id": "S-DE-0003",
+  "server_time": "2026-06-09T23:15:02+02:00",
+  "events": [
+    { "type": "meter_value", "charger_id": "C-DE-0003-A", "connector_id": "1", "energy_register_wh": null, "power_w": 0, "ts": "2026-06-09T23:14:58+02:00" },
+    { "type": "status", "charger_id": "C-DE-0003-A", "ts": "2026-06-09T23:14:58+02:00" }
+  ]
+}

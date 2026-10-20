@@ -1,0 +1,21 @@
+{
+  "_note": "The brief gives no tariffs (pending commercial input). These are SAMPLE values so the settlement path can be exercised end to end; every row is stored with is_sample = true. Prices exclude GST/VAT.",
+  "tariffs": [
+    {
+      "tariff_id": "acme-charge-2026-sample",
+      "operator_id": "acme-charge",
+      "currency": "INR",
+      "price_per_kwh": "18.0000",
+      "session_fee": "25.00",
+      "valid_from": "2026-01-01T00:00:00+05:30"
+    },
+    {
+      "tariff_id": "stadtwerke-ev-2026-sample",
+      "operator_id": "stadtwerke-ev",
+      "currency": "EUR",
+      "price_per_kwh": "0.5900",
+      "session_fee": "0.49",
+      "valid_from": "2026-01-01T00:00:00+01:00"
+    }
+  ]
+}

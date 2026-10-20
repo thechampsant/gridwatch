@@ -1,0 +1,6 @@
+{
+  "delivery_id": "dlv-004",
+  "events": [
+    { "type": "session", "event": "session.stop", "charger_id": "C-IN-0012-A", "connector_id": "1", "session_id": "sess-in-77c", "start_meter_wh": 12044990, "stop_meter_wh": 31200, "ts": "2026-06-09T18:40:12+05:30" }
+  ]
+}

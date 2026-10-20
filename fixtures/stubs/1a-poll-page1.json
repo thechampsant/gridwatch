@@ -1,0 +1,11 @@
+{
+  "site_id": "S-IN-0007",
+  "server_time": "2026-06-09T14:32:25+05:30",
+  "next_cursor": "eyJvZmZzZXQiOjUwfQ==",
+  "events": [
+    { "type": "status", "charger_id": "C-IN-0007-A", "connector_id": "1", "status": "Charging", "ts": "2026-06-09T14:32:11+05:30" },
+    { "type": "meter_value", "charger_id": "C-IN-0007-A", "connector_id": "1", "energy_register_wh": 4821553, "power_w": 41200, "ts": "2026-06-09T14:32:11+05:30" },
+    { "type": "meter_value", "charger_id": "C-IN-0007-A", "connector_id": "1", "energy_register_wh": 4821667, "power_w": 41050, "ts": "2026-06-09T14:32:21+05:30" },
+    { "type": "status", "charger_id": "C-IN-0007-B", "connector_id": "1", "status": "Available", "ts": "2026-06-09T14:32:09+05:30" }
+  ]
+}

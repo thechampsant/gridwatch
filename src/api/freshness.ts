@@ -1,0 +1,127 @@
+import type { Client } from '../db/pool.js';
+
+// The contract KPIs, and what the vendor interface allows. Verdicts are
+// structural (they follow from the interface contract), not statistical: a
+// handful of stub events can't establish a P99.9. Measured numbers are shown
+// alongside as evidence, split into vendor-attributable and our own.
+export const KPIS = [
+  {
+    key: 'status',
+    signal: 'Connector / charger status',
+    targetSec: 5,
+    percentile: 'P99.9',
+    eventTypes: ['status'],
+    vendorFloor: 'Webhook batches can hold events up to 60 s; polls are at most every 30 s.',
+    verdict: 'missed_at_source',
+  },
+  {
+    key: 'power',
+    signal: 'Active session power & energy',
+    targetSec: 10,
+    percentile: 'P99.9',
+    eventTypes: ['meter_value'],
+    vendorFloor: 'Meter values arrive only by poll, at most every 30 s, and keep ageing until the next poll.',
+    verdict: 'missed_at_source',
+  },
+  {
+    key: 'fault',
+    signal: 'Fault / alarm surfaced',
+    targetSec: 5,
+    percentile: 'P99.9',
+    eventTypes: ['fault'],
+    vendorFloor: 'Webhook batches can hold events up to 60 s; polls are at most every 30 s.',
+    verdict: 'missed_at_source',
+  },
+  {
+    key: 'map',
+    signal: 'Map live-status update',
+    targetSec: 10,
+    percentile: 'P95',
+    eventTypes: ['status'],
+    vendorFloor: 'Same feed as status.',
+    verdict: 'missed_at_source',
+  },
+  {
+    key: 'tile',
+    signal: 'Dashboard tile end-to-end',
+    targetSec: 2,
+    percentile: 'P99.9',
+    eventTypes: [] as string[],
+    vendorFloor: 'None: receipt to screen happens inside GridWatch.',
+    verdict: 'ours',
+  },
+] as const;
+
+interface VendorStats {
+  event_type: string;
+  poll_n: number;
+  poll_min: number | null;
+  poll_max: number | null;
+  webhook_n: number;
+  webhook_p50: number | null;
+}
+
+export async function freshnessReport(c: Client) {
+  const vendor = (
+    await c.query<VendorStats>(
+      `SELECT event_type,
+              count(*) FILTER (WHERE source = 'poll' AND server_time IS NOT NULL)::int AS poll_n,
+              min(extract(epoch FROM server_time - event_ts)) FILTER (WHERE source = 'poll')::float8 AS poll_min,
+              max(extract(epoch FROM server_time - event_ts)) FILTER (WHERE source = 'poll')::float8 AS poll_max,
+              count(*) FILTER (WHERE source = 'webhook')::int AS webhook_n,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM received_at - event_ts))
+                FILTER (WHERE source = 'webhook')::float8 AS webhook_p50
+         FROM ingest_outcomes
+        WHERE event_ts IS NOT NULL AND outcome <> 'quarantined'
+        GROUP BY event_type`,
+    )
+  ).rows;
+  const platform = (
+    await c.query<{ n: number; p: number[] | null; max: number | null }>(
+      `SELECT count(*)::int AS n,
+              percentile_cont(ARRAY[0.5, 0.99, 0.999]) WITHIN GROUP (ORDER BY extract(epoch FROM processed_at - received_at)) AS p,
+              max(extract(epoch FROM processed_at - received_at))::float8 AS max
+         FROM ingest_outcomes WHERE outcome IN ('applied', 'held')`,
+    )
+  ).rows[0];
+
+  const byType = new Map(vendor.map((v) => [v.event_type, v]));
+  const platformStats = {
+    events: platform?.n ?? 0,
+    p50Sec: platform?.p?.[0] ?? null,
+    p99Sec: platform?.p?.[1] ?? null,
+    p999Sec: platform?.p?.[2] ?? null,
+    maxSec: platform?.max ?? null,
+    measures: 'receipt at the GridWatch edge -> state committed',
+  };
+
+  return {
+    platform: platformStats,
+    signals: KPIS.map((k) => {
+      const stats = k.eventTypes.map((t) => byType.get(t)).filter((v): v is VendorStats => !!v);
+      const pollN = stats.reduce((a, s) => a + s.poll_n, 0);
+      const mins = stats.map((s) => s.poll_min).filter((v): v is number => v !== null);
+      const maxs = stats.map((s) => s.poll_max).filter((v): v is number => v !== null);
+      const webhookP50 = stats.map((s) => s.webhook_p50).find((v) => v !== null) ?? null;
+      let verdict: string = k.verdict;
+      if (k.verdict === 'ours') {
+        verdict =
+          platformStats.p999Sec === null ? 'ours_no_data' : platformStats.p999Sec < k.targetSec ? 'ours_met' : 'ours_at_risk';
+      }
+      return {
+        key: k.key,
+        signal: k.signal,
+        targetSec: k.targetSec,
+        percentile: k.percentile,
+        vendorFloor: k.vendorFloor,
+        verdict,
+        vendorAgeWhenServed:
+          pollN > 0 ? { samples: pollN, minSec: Math.min(...mins), maxSec: Math.max(...maxs), measures: 'poll server_time - event time' } : null,
+        webhookReceiptLagP50Sec: webhookP50,
+        // Stub payloads are dated June 2026 and replayed now, so receipt lag on
+        // them is months: flagged rather than presented as a measurement.
+        webhookLagIsReplay: webhookP50 !== null && webhookP50 > 86_400,
+      };
+    }),
+  };
+}

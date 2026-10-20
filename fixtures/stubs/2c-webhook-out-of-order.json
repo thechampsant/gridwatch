@@ -1,0 +1,9 @@
+{
+  "delivery_id": "dlv-003",
+  "events": [
+    { "type": "session", "event": "session.stop", "charger_id": "C-IN-0007-A", "connector_id": "1", "session_id": "sess-in-44a", "start_meter_wh": 4810000, "stop_meter_wh": 4821667, "ts": "2026-06-09T14:32:21+05:30" },
+    { "type": "status", "charger_id": "C-IN-0007-A", "connector_id": "1", "status": "Available", "ts": "2026-06-09T14:33:40+05:30" },
+    { "type": "status", "charger_id": "C-IN-0007-A", "connector_id": "1", "status": "Charging", "ts": "2026-06-09T14:31:50+05:30" },
+    { "type": "session", "event": "session.start", "charger_id": "C-IN-0007-A", "connector_id": "1", "session_id": "sess-in-44a", "start_meter_wh": 4810000, "ts": "2026-06-09T14:25:02+05:30" }
+  ]
+}

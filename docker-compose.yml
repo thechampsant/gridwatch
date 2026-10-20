@@ -1,0 +1,193 @@
+# One command: `docker compose up`
+#
+# Start-up order (enforced with depends_on conditions):
+#   db, localstack      -> healthy
+#   terraform           -> applies infra/terraform to LocalStack (S3 + Secrets Manager), exits 0
+#   migrate             -> schema, roles, pilot catalogue, geocoding, exits 0
+#   api, processor      -> webhook receiver + query API, inbox processor
+#   csms-fake           -> stands in for the vendor CSMS (poll API + signed webhooks)
+#   poller              -> polls csms-fake on the adaptive schedule
+#   prometheus          -> scrapes the three services
+#
+# Tests: `docker compose --profile test run --rm test`
+
+name: gridwatch
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://gridwatch_ingest:${INGEST_DB_PASSWORD:-gridwatch_ingest}@db:5432/gridwatch
+  API_DATABASE_URL: postgres://gridwatch_api:${API_DB_PASSWORD:-gridwatch_api}@db:5432/gridwatch
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  RAW_ARCHIVE_BUCKET: gridwatch-raw-archive-local
+  CSMS_BASE_URL: http://csms-fake:8090
+  CSMS_CONNECTION_ID: csms-main
+  JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me}
+  DEMO_MODE: "true"
+
+# The app image is built once (by `migrate`) and reused by every app service.
+x-app: &app
+  image: gridwatch-app:local
+  pull_policy: never
+  restart: unless-stopped
+
+services:
+  db:
+    image: timescale/timescaledb-ha:pg17.11-ts2.30.2
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gridwatch}
+      POSTGRES_DB: gridwatch
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/home/postgres/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gridwatch"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  localstack:
+    image: localstack/localstack:4.14.0  # last release that runs without an auth token
+    environment:
+      SERVICES: s3,secretsmanager
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  terraform:
+    image: hashicorp/terraform:1.16.6
+    working_dir: /infra
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        terraform init -input=false -lockfile=readonly &&
+        terraform apply -input=false -auto-approve -state=/tfdata/terraform.tfstate
+    environment:
+      TF_DATA_DIR: /tfdata/.terraform
+      TF_PLUGIN_CACHE_DIR: /tfdata/plugin-cache
+      TF_VAR_aws_endpoint: http://localstack:4566
+      TF_VAR_webhook_hmac_secret: ${WEBHOOK_HMAC_SECRET:-dev-only-webhook-secret}
+      TF_VAR_vendor_api_token: ${VENDOR_API_TOKEN:-dev-only-vendor-token}
+    volumes:
+      - ./infra/terraform:/infra:ro
+      - tfdata:/tfdata
+    depends_on:
+      localstack:
+        condition: service_healthy
+    restart: "no"
+
+  migrate:
+    <<: *app
+    build:
+      context: .
+      target: runtime
+    pull_policy: build
+    command: ["node", "dist/bin/migrate.js", "--seed"]
+    environment:
+      <<: *app-env
+      DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:-gridwatch}@db:5432/gridwatch
+      INGEST_DB_PASSWORD: ${INGEST_DB_PASSWORD:-gridwatch_ingest}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:-gridwatch_api}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["node", "dist/bin/api.js"]
+    environment:
+      <<: *app-env
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # 127.0.0.1, not localhost: in Alpine localhost resolves to ::1 first.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      terraform:
+        condition: service_completed_successfully
+
+  processor:
+    <<: *app
+    command: ["node", "dist/bin/processor.js"]
+    environment:
+      <<: *app-env
+      METRICS_PORT: "9101"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      terraform:
+        condition: service_completed_successfully
+
+  csms-fake:
+    <<: *app
+    command: ["node", "dist/bin/fake-csms.js"]
+    environment:
+      PORT: "8090"
+      WEBHOOK_URL: http://api:8080/webhooks/csms/csms-main
+      WEBHOOK_HMAC_SECRET: ${WEBHOOK_HMAC_SECRET:-dev-only-webhook-secret}
+      FAKE_ERROR_RATE: ${FAKE_ERROR_RATE:-0}
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    depends_on:
+      api:
+        condition: service_healthy
+
+  poller:
+    <<: *app
+    command: ["node", "dist/bin/poller.js"]
+    environment:
+      <<: *app-env
+      METRICS_PORT: "9102"
+      # Production: 30 s for sites with a session in progress, 2-5 min otherwise.
+      # The demo shortens the idle interval so the scripted scenario finishes in about a minute.
+      POLL_ACTIVE_INTERVAL_SEC: "30"
+      POLL_IDLE_INTERVAL_SEC: "60"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      csms-fake:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    command: ["npx", "vitest", "run"]
+    environment:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:-gridwatch}@db:5432/postgres
+      TEST_DB_HOST: db
+      TEST_DB_PORT: "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  tfdata:

@@ -1,0 +1,31 @@
+{
+  "_note": "Demo stand-ins for the first two steps of the geocoding chain. Coordinates were entered by hand and are approximate. In production, overrides come from the operations review queue and the cache from a licensed geocoder whose terms allow storing results.",
+  "overrides": [
+    {
+      "site_id": "S-IN-0007",
+      "lat": 28.5708,
+      "lng": 77.3261,
+      "precision": "landmark",
+      "note": "Metro station gate pinned by operations (demo value)",
+      "created_by": "ops-demo"
+    }
+  ],
+  "cache": [
+    {
+      "address": "Phoenix Marketcity, Whitefield Rd, Mahadevapura, Bengaluru, KA 560048",
+      "lat": 12.9975,
+      "lng": 77.6963,
+      "precision": "landmark",
+      "source": "provider_cache (demo value)",
+      "confidence": 0.8
+    },
+    {
+      "address": "Ladestation Hauptbahnhof, Arnulf-Klett-Platz 2, 70173 Stuttgart",
+      "lat": 48.784,
+      "lng": 9.1829,
+      "precision": "street",
+      "source": "provider_cache (demo value)",
+      "confidence": 0.9
+    }
+  ]
+}
