@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { SecretProvider } from '../archive/aws.js';
 import { parseAsOf, type Clock } from '../clock.js';
 import { withTenant, withTx, type Client, type Pool, type TenantContext } from '../db/pool.js';
+import { CoverageError, coverageGaps, densityResError, hexDensity } from '../geo/coverage.js';
 import { registry } from '../observability/metrics.js';
 import { AuthError, issueToken, verifyToken } from './auth.js';
 import { freshnessReport } from './freshness.js';
@@ -219,6 +220,54 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         nearestBeyondRadius: results.length === 0 ? beyond : null,
       };
     });
+  });
+
+  // Density on the H3 grid: hexagons, ~1,770 km² areas with chargers per
+  // 1,000 km², and a per-country line. Finer than resolution 6 is refused,
+  // because most pins are postal-area centres (±2 km).
+  app.get('/v1/coverage', async (req, reply) => {
+    const q = req.query as Record<string, string | undefined>;
+    const res = q.res === undefined ? 6 : Number(q.res);
+    const bad = densityResError(res);
+    if (bad) return reply.code(400).send({ error: bad });
+    const includeSynthetic = q.include_synthetic !== 'false';
+    let at: Date;
+    try {
+      at = asOf(req);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+    return run(req, async (c) => {
+      const views = (await loadSiteViews(c, at, deps.staleAfterSec)).filter((v) => includeSynthetic || !v.synthetic);
+      const density = await hexDensity(c, { res, includeSynthetic, available: new Map(views.map((v) => [v.siteId, availableConnectors(v).length])) });
+      return { asOf: at.toISOString(), ...density, unplacedSites: views.filter((v) => v.geocode.lat === null).length };
+    });
+  });
+
+  // Where the network is thin: inside the metro areas it already serves, cells
+  // more than max_km from any charger (static gap) or from one that is free
+  // and working right now (live gap). Supply only: there is no demand data.
+  app.get('/v1/coverage/gaps', async (req, reply) => {
+    const q = req.query as Record<string, string | undefined>;
+    const maxKm = q.max_km === undefined ? 5 : Number(q.max_km);
+    if (!Number.isFinite(maxKm) || maxKm < 1 || maxKm > 50) return reply.code(400).send({ error: 'max_km must be from 1 to 50' });
+    const includeSynthetic = q.include_synthetic !== 'false';
+    let at: Date;
+    try {
+      at = asOf(req);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+    try {
+      return await run(req, async (c) => {
+        const views = await loadSiteViews(c, at, deps.staleAfterSec);
+        const availableSiteIds = views.filter((v) => availableConnectors(v).length > 0).map((v) => v.siteId);
+        return { asOf: at.toISOString(), ...(await coverageGaps(c, { maxKm, includeSynthetic, availableSiteIds })) };
+      });
+    } catch (err) {
+      if (err instanceof CoverageError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
   });
 
   app.get('/v1/sessions', async (req) => {

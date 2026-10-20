@@ -54,6 +54,11 @@
           <h2 id="map-h">Network map</h2>
           <div class="legend" id="legend"></div>
         </div>
+        <div class="map-layers small" role="group" aria-label="Map layers">
+          <label class="toggle"><input type="checkbox" id="layer-density"> Density: chargers per hexagon</label>
+          <label class="toggle"><input type="checkbox" id="layer-gaps"> Coverage gaps</label>
+          <div class="legend" id="layer-legend"></div>
+        </div>
         <div id="map" class="map" role="region" aria-label="Map of sites coloured by status"></div>
         <p class="small" id="map-count"></p>
         <p class="small muted">Each pin is worked out from the site's address. A wide halo means the location is approximate; a number means several sites share one approximate location. Click anywhere on the map to find the nearest free charger from that point. Pins here are approximate demo values entered by hand for this take-home; Cidroy's data has no coordinates.</p>
@@ -75,6 +80,33 @@
       </div>
       <div id="pin-banner" class="panel small" hidden></div>
       <div class="loc-grid" id="locations"></div>
+    </section>
+
+    <section class="card" aria-labelledby="cov-h">
+      <div class="card-head">
+        <div>
+          <h2 id="cov-h">Coverage and density</h2>
+          <div class="small muted">Measured on a grid of equal-size hexagons. Each area below is about 1,770 km², named after its main city; density is chargers per 1,000 km². Turn on the map layers above to see the hexagons and the gaps.</div>
+        </div>
+        <label class="small toggle">Gap distance
+          <select id="gap-km">
+            <option value="2">2 km</option>
+            <option value="5">5 km</option>
+            <option value="10">10 km</option>
+          </select>
+        </label>
+      </div>
+      <div class="small" id="cov-summary"></div>
+      <div class="cov-grid">
+        <div>
+          <h3>Density by area</h3>
+          <div class="table-scroll"><table class="sessions" id="areas"></table></div>
+        </div>
+        <div>
+          <h3>Gaps</h3>
+          <div id="gaps" class="small"></div>
+        </div>
+      </div>
     </section>
 
     <div class="row">

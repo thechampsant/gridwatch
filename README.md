@@ -25,7 +25,7 @@ The fake vendor plays the stub scenario in about a minute. Then:
 
 | Open | For |
 |---|---|
-| http://localhost:8080/dashboard | The dashboard on live data. **Operations** is the control room's view in plain language: free connectors, live charging, sites needing attention, the network map, a free-charger finder, and sessions with billing. **How it works** shows the evidence: data delay split into the vendor's share and ours, the per-event ingestion log, and (as GridWatch admin) vendor calls and set-aside records. Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
+| http://localhost:8080/dashboard | The dashboard on live data. **Operations** is the control room's view in plain language: free connectors, live charging, sites needing attention, the network map (with density and coverage-gap layers), coverage by area, a free-charger finder, and sessions with billing. **How it works** shows the evidence: data delay split into the vendor's share and ours, the per-event ingestion log, and (as GridWatch admin) vendor calls and set-aside records. Switch "Demo: view as" between Acme, Stadtwerke and GridWatch admin |
 | Missing coordinates, end to end | On **Operations**, the **Site locations** panel shows what could be placed, how exactly, and the three sites that could not, each with the reason. They are still monitored and billed but kept off the map and out of find-a-free-charger. Switch to **GridWatch admin**, press **Pin on map** on one of them (for example S-IN-0029 in Chennai), then click the map: the site appears as "Location verified", and the pin is audited. **How it works** opens with a table of every failure point, what GridWatch does about it, and how often it happened in this run |
 | `./scripts/demo.sh` | A terminal walkthrough: ingestion log, tenant isolation, nearest charger, sessions, settlement, freshness, vendor calls, infrastructure |
 | http://localhost:9090 | Prometheus: `gridwatch_pipeline_latency_seconds`, `gridwatch_source_lag_seconds`, `gridwatch:pipeline_latency_seconds:p999_5m`, alerts |
@@ -59,11 +59,11 @@ The brief asks for "real ingestion working … one correct, useful aggregate". I
 | Ingest from the CSMS stubs | `src/api/webhook.ts`, `src/ingest/poller.ts`, `src/fake-csms/` | Webhooks verified with HMAC and acknowledged only after a durable write; poller with leases, adaptive schedule, high-water mark from `server_time` |
 | Normalise | `src/ingest/normalize.ts` | Per-event validation; local offsets → UTC, original kept; strict schemas |
 | Store | `migrations/*.sql` | Core tables with RLS; TimescaleDB hypertables with compression and retention; PostGIS geography |
-| Useful aggregates | `src/api/server.ts` | `/v1/sites/status` (rollup with data age), `/v1/chargers/nearest` (geodesic KNN over fresh Available connectors), daily settlement |
+| Useful aggregates | `src/api/server.ts`, `src/geo/coverage.ts` | `/v1/sites/status` (rollup with data age), `/v1/chargers/nearest` (geodesic KNN over fresh Available connectors), `/v1/coverage` (H3 density, chargers per 1,000 km² by area) and `/v1/coverage/gaps` (supply-only gaps that follow live status), daily settlement |
 | 429 / 500 / malformed | `src/ingest/poller.ts`, `src/ingest/processor.ts` | 429: honour `Retry-After` and resume from the same cursor. 500: jittered retries, then give up without advancing the high-water mark. Malformed: quarantine per event |
 | `docker compose up` | `docker-compose.yml` | One command, ordered by health and completion conditions |
 | IaC | `infra/terraform` | Applied to LocalStack by the `terraform` service |
-| Tests at failure modes | `test/` | 43 tests, listed below |
+| Tests at failure modes | `test/` | 59 tests, listed below |
 | Coordinates as they arrive | `src/geo/geocoder.ts` | Addresses only → override, cache, postal fallback; precision recorded; unresolved sites kept off the map |
 
 ### The stub scenario, end to end
@@ -105,6 +105,7 @@ Unit tests (`test/unit`) need nothing. Integration tests (`test/integration`) ru
 - **Webhook endpoint:** a bad signature stores nothing; a good one is acknowledged after the write.
 - **Nearest-available:** geodesic distance within 0.5% of haversine; faulted, stale and ungeocoded sites skipped with reasons; never another tenant's chargers.
 - **Geocoding:** a manual pin beats every later step; the postal fallback says it is approximate (±2 km); an address that can't be placed returns nothing instead of a guess, with the reason (no postal code, or a postal code we don't cover).
+- **Coverage and density:** hexagon counts add up to the placed sites, with unplaced ones listed apart; an operator sees only its own cells; cells finer than a postal-area pin can support are refused (400); approximate cells are flagged; a faulted site's surroundings show as a live gap, and a covered cell becomes one when its site goes quiet.
 - **Fixing a missing location:** the reason appears in the map's unresolved list while the site's faults are still tracked; only platform admins can pin (operators get 403); a pin outside the site's country is refused (400); a valid pin puts the site on the map as verified and writes an audit row.
 
 ## Design summary
@@ -188,6 +189,8 @@ All `/v1` routes need `Authorization: Bearer <JWT>`. The tenant comes from the t
 | `GET /v1/sites/status?as_of=` | Per-site rollup with connector status, faults, data age, geocode precision |
 | `GET /v1/map/sites` | GeoJSON of geocoded sites + list of unresolved ones |
 | `GET /v1/chargers/nearest?lat=&lng=&max_km=&limit=&as_of=&include_synthetic=` | Nearest available connectors, closer sites skipped with reasons (`include_synthetic=false` leaves out generated demo sites) |
+| `GET /v1/coverage?res=4-6&include_synthetic=` | Density on the H3 grid: hexagons with sites, chargers and free connectors; ~1,770 km² areas with chargers per 1,000 km²; a line per country |
+| `GET /v1/coverage/gaps?max_km=&include_synthetic=` | Inside the metro areas served: cells more than `max_km` from any charger, or from one free and working now. Supply only |
 | `GET /v1/sessions?date=` | Sessions with billing status, review reason, charge |
 | `GET /v1/settlement/statements?date=` | Latest statement version per operator and day |
 | `GET /v1/ingestion/events` | What happened to each event, and why |
@@ -203,13 +206,13 @@ docker compose exec api node dist/bin/mint-token.js acme-charge
 ```
 
 ## Where I stopped, and what's next
-**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 43 tests passing.
+**Done:** everything above, run from a clean `docker compose down -v && docker compose up --build`, with all 59 tests passing.
 
 **Next, in priority order:**
 1. **Swap the inbox for Kafka** (D7). Put `processRow` behind a consumer and test rebalances and the offset-rewind runbook after a database failover. Load-test to 20k events/s to check the sizing in Part A §10.
 2. **Push instead of poll on the dashboard.** Redis live state plus a WebSocket gateway; measure receipt → render with a browser beacon, so the "≤ 2 s P99.9" commitment is measured end to end, not only to commit.
 3. **Telemetry rollups.** Continuous aggregates with `counter_agg` (reset-aware energy) and `state_agg` (utilisation), and an integer `connector_key` instead of text IDs in hypertables.
-4. **Density and coverage.** Admin boundary polygons, an H3 grid, chargers per km², gap detection; vector tiles via Martin.
+4. **Density and coverage, production version.** The slice computes H3 density and supply-only gaps per request. Production adds admin boundary polygons in `site_regions` (mapped at geocode time, with India's official boundaries), cells materialised at geocode time, a demand layer (population, traffic) to rank gaps, and vector tiles via Martin.
 5. **Settlement operations.** Scheduled per-operator runs after local midnight, an exceptions workflow for held sessions, and a re-rate audit trail.
 6. **Live simulator profile** for the fake vendor (continuous sessions, random 429/500/duplicates) to exercise the adaptive poller and SLO alerts over hours rather than one scripted minute.
 7. **Production IaC.** The Terraform module pointed at real AWS with an S3 state backend and locking, plus managed Postgres (Multi-AZ), MSK and ElastiCache modules for one regional cell.

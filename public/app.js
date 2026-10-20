@@ -154,6 +154,10 @@ const state = {
   pinning: null, // site ID an admin is placing on the map
   pinMessage: null,
   lastStatus: null,
+  coverage: null, // /v1/coverage: hexagons, areas, countries
+  gaps: null, // /v1/coverage/gaps
+  layers: { density: readPref('gw.layer.density', 'false') === 'true', gaps: readPref('gw.layer.gaps', 'false') === 'true' },
+  gapKm: [2, 5, 10].includes(Number(readPref('gw.gapkm', '5'))) ? Number(readPref('gw.gapkm', '5')) : 5,
 };
 
 function readPref(key, fallback) {
@@ -399,6 +403,44 @@ function initMap() {
     map.addSource('all', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addSource('singles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addSource('point', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    // Coverage layers sit under the pins. Hexagons whose pins are only
+    // postal-area centres get a dashed outline; so do uncertain gap cells.
+    map.addSource('coverage', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addSource('gaps', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'coverage-fill',
+      type: 'fill',
+      source: 'coverage',
+      layout: { visibility: 'none' },
+      paint: { 'fill-color': ['step', ['get', 'chargers'], DENSITY_STEPS[0][1], ...DENSITY_STEPS.slice(1).flat()], 'fill-opacity': 0.5 },
+    });
+    map.addLayer({ id: 'coverage-line', type: 'line', source: 'coverage', filter: ['!', ['get', 'approximate']], layout: { visibility: 'none' }, paint: { 'line-color': '#1D5FD0', 'line-width': 1.2 } });
+    map.addLayer({
+      id: 'coverage-line-approx',
+      type: 'line',
+      source: 'coverage',
+      filter: ['get', 'approximate'],
+      layout: { visibility: 'none' },
+      paint: { 'line-color': '#1D5FD0', 'line-width': 1.2, 'line-dasharray': [2, 2] },
+    });
+    map.addLayer({
+      id: 'gaps-fill',
+      type: 'fill',
+      source: 'gaps',
+      layout: { visibility: 'none' },
+      paint: {
+        'fill-color': ['match', ['get', 'kind'], 'static', GAP_KIND.static.color, GAP_KIND.live.color],
+        'fill-opacity': ['case', ['get', 'uncertain'], 0.15, 0.32],
+      },
+    });
+    map.addLayer({
+      id: 'gaps-line',
+      type: 'line',
+      source: 'gaps',
+      filter: ['get', 'uncertain'],
+      layout: { visibility: 'none' },
+      paint: { 'line-color': '#3E444D', 'line-width': 1, 'line-dasharray': [2, 2] },
+    });
     const color = ['match', ['get', 'rollup'], 'Healthy', ROLLUP.Healthy.color, 'Attention', ROLLUP.Attention.color, 'Faulted', ROLLUP.Faulted.color, ROLLUP.Stale.color];
     map.addLayer({
       id: 'halo',
@@ -440,15 +482,139 @@ function initMap() {
         return;
       }
       if (map.queryRenderedFeatures(e.point, { layers: ['sites'] }).length) return;
+      const cells = map.queryRenderedFeatures(e.point, { layers: ['gaps-fill', 'coverage-fill'] });
+      if (cells.length) {
+        openCellPopup(e.lngLat, cells);
+        return;
+      }
       state.point = { key: null, name: 'the point you clicked', lat: e.lngLat.lat, lng: e.lngLat.lng };
       void loadNearest();
     });
     map.on('mouseenter', 'sites', () => (map.getCanvas().style.cursor = 'pointer'));
     map.on('mouseleave', 'sites', () => (map.getCanvas().style.cursor = ''));
     state.mapReady = true;
+    applyCoverageLayers();
     void refresh();
   });
   state.map = map;
+}
+
+// ---- Coverage and density --------------------------------------------------
+
+// Fill colour by chargers in a hexagon (~36 km² at resolution 6).
+const DENSITY_STEPS = [
+  [1, '#DCE6F8'],
+  [3, '#A9C1F0'],
+  [6, '#6F95E3'],
+  [11, '#2F63C9'],
+];
+const GAP_KIND = {
+  static: { label: (km) => `No charger within ${km} km`, color: '#C0362C' },
+  live: { label: (km) => `Chargers within ${km} km, none free right now`, color: '#E59A1F' },
+};
+const COUNTRY = { IN: 'India', DE: 'Germany' };
+
+async function loadCoverage() {
+  if (!state.token) return;
+  const syn = `include_synthetic=${state.showSynthetic}`;
+  try {
+    const [cov, gaps] = await Promise.all([api(`/v1/coverage?res=6&${syn}`), api(`/v1/coverage/gaps?max_km=${state.gapKm}&${syn}`)]);
+    state.coverage = cov;
+    state.gaps = gaps;
+    renderCoverage();
+    applyCoverageLayers();
+  } catch (err) {
+    $('gaps').textContent = `Could not load coverage: ${err.message}`;
+  }
+}
+
+function applyCoverageLayers() {
+  renderLayerLegend();
+  if (!state.mapReady) return;
+  const m = state.map;
+  if (state.coverage) m.getSource('coverage').setData(state.coverage.hexes);
+  if (state.gaps) m.getSource('gaps').setData(state.gaps.gaps);
+  for (const id of ['coverage-fill', 'coverage-line', 'coverage-line-approx']) m.setLayoutProperty(id, 'visibility', state.layers.density ? 'visible' : 'none');
+  for (const id of ['gaps-fill', 'gaps-line']) m.setLayoutProperty(id, 'visibility', state.layers.gaps ? 'visible' : 'none');
+}
+
+function renderLayerLegend() {
+  const parts = [];
+  if (state.layers.density) {
+    parts.push(
+      ...DENSITY_STEPS.map(([from, c], i) => {
+        const to = DENSITY_STEPS[i + 1]?.[0];
+        return `<span><span class="swatch" style="background:${c}"></span>${to ? (to - 1 === from ? from : `${from}–${to - 1}`) : `${from}+`} chargers</span>`;
+      }),
+      '<span><span class="swatch dashed"></span>approximate pins</span>',
+    );
+  }
+  if (state.layers.gaps) {
+    parts.push(
+      ...Object.values(GAP_KIND).map((g) => `<span><span class="swatch" style="background:${g.color};opacity:.6"></span>${esc(g.label(state.gapKm))}</span>`),
+      '<span><span class="swatch dashed"></span>uncertain</span>',
+    );
+  }
+  $('layer-legend').innerHTML = parts.join('');
+}
+
+function openCellPopup(lngLat, cells) {
+  const gap = cells.find((f) => f.layer.id === 'gaps-fill')?.properties;
+  const hex = cells.find((f) => f.layer.id === 'coverage-fill')?.properties;
+  const lines = [];
+  if (gap) {
+    lines.push(`<b>${esc(GAP_KIND[gap.kind].label(state.gapKm))}</b>`);
+    lines.push(`Nearest charger: ${esc(gap.nearestName)}, ${esc(fmtNum(gap.nearestKm, 1))} km`);
+    if (gap.kind === 'live')
+      lines.push(
+        gap.nearestAvailableName ? `Nearest free and working: ${esc(gap.nearestAvailableName)}, ${esc(fmtNum(gap.nearestAvailableKm, 1))} km` : 'Nothing on your network is free and working right now',
+      );
+    if (gap.uncertain === true || gap.uncertain === 'true') lines.push('<span class="muted">Uncertain: that distance is to a postal-area centre (±2 km)</span>');
+  }
+  if (hex) {
+    if (lines.length) lines.push('');
+    lines.push(`<b>${esc(hex.sites)} site${Number(hex.sites) === 1 ? '' : 's'} in this hexagon</b> · ${esc(hex.chargers)} chargers · ${esc(hex.availableNow)} connectors free now`);
+    if (hex.approximate === true || hex.approximate === 'true') lines.push('<span class="muted">Approximate: some pins are postal-area centres (±2 km)</span>');
+  }
+  new maplibregl.Popup().setLngLat(lngLat).setHTML(lines.join('<br>')).addTo(state.map);
+}
+
+function renderCoverage() {
+  const cov = state.coverage;
+  const g = state.gaps;
+  if (!cov || !g) return;
+  $('cov-summary').innerHTML =
+    cov.countries
+      .map(
+        (c) =>
+          `<b>${esc(COUNTRY[c.country] ?? c.country)}:</b> ${c.sites} sites · ${c.chargers} chargers · ${c.availableNow} connectors free now · in ${c.areas} area${c.areas === 1 ? '' : 's'}`,
+      )
+      .join('<br>') + (cov.unplacedSites ? `<br><span class="muted">${cov.unplacedSites} site${cov.unplacedSites === 1 ? '' : 's'} without a location ${cov.unplacedSites === 1 ? 'is' : 'are'} not counted.</span>` : '');
+  $('areas').innerHTML =
+    '<thead><tr><th>Area</th><th>Sites</th><th>Chargers</th><th>Per 1,000 km²</th><th>Free now</th></tr></thead><tbody>' +
+    cov.areas
+      .map(
+        (a) =>
+          `<tr><td><b>${esc(a.name)}</b>${a.alsoIncludes.length ? `<div class="small muted">also ${esc(a.alsoIncludes.join(', '))}</div>` : ''}${
+            a.approximateSites ? `<div class="small muted">${a.approximateSites} of ${a.sites} pins approximate</div>` : ''
+          }</td><td class="mono">${a.sites}</td><td class="mono">${a.chargers}</td><td class="mono">${esc(fmtNum(a.chargersPer1000Km2, 1))}</td><td class="mono">${a.availableNow}</td></tr>`,
+      )
+      .join('') +
+    '</tbody>';
+  const s = g.summary;
+  const km2 = (x) => `${fmtNum(x)} km²`;
+  $('gaps').innerHTML =
+    `<p>Inside the ${g.clusters.length} metro area${g.clusters.length === 1 ? '' : 's'} your network serves (${km2(s.serviceAreaKm2)}): <b>${km2(s.staticGapKm2)}</b> ${
+      s.staticGapKm2 === 1 ? 'is' : 'are'
+    } more than ${g.maxKm} km from any charger, and <b>${km2(s.liveGapKm2)}</b> ${s.liveGapKm2 === 1 ? 'has' : 'have'} chargers within ${g.maxKm} km but none free and working right now.${
+      s.uncertainCells ? ` ${s.uncertainCells} hexagon${s.uncertainCells === 1 ? ' is' : 's are'} uncertain, because the nearest pin is a postal-area centre.` : ''
+    }</p>` +
+    '<div class="table-scroll"><table class="sessions"><thead><tr><th>Metro area</th><th>Sites</th><th>No charger nearby</th><th>None free now</th></tr></thead><tbody>' +
+    g.clusters
+      .map((c) => `<tr><td><b>${esc(c.name)}</b>${c.alsoIncludes.length ? `<div class="small muted">also ${esc(c.alsoIncludes.join(', '))}</div>` : ''}</td><td class="mono">${c.sites}</td><td class="mono">${km2(c.staticGapKm2)}</td><td class="mono">${km2(c.liveGapKm2)}</td></tr>`)
+      .join('') +
+    '</tbody></table></div>' +
+    `<p class="muted">Supply only: there is no demand data (population, traffic), so a gap means far from a charger, not proven demand. Distances are from hexagon centres (about 5 km² each).</p>`;
 }
 
 function renderMap(geo) {
@@ -854,7 +1020,7 @@ async function switchPersona(persona) {
   state.fitted = false;
   renderChrome();
   await login(persona);
-  await Promise.all([refresh(), loadNearest()]);
+  await Promise.all([refresh(), loadNearest(), loadCoverage()]);
 }
 
 function switchTab(tab) {
@@ -903,6 +1069,24 @@ $('show-synthetic').addEventListener('change', (e) => {
   state.fitted = false;
   void refresh();
   void loadNearest();
+  void loadCoverage();
+});
+for (const [key, id] of [
+  ['density', 'layer-density'],
+  ['gaps', 'layer-gaps'],
+]) {
+  $(id).checked = state.layers[key];
+  $(id).addEventListener('change', (e) => {
+    state.layers[key] = e.target.checked;
+    writePref(`gw.layer.${key}`, String(e.target.checked));
+    applyCoverageLayers();
+  });
+}
+$('gap-km').value = String(state.gapKm);
+$('gap-km').addEventListener('change', (e) => {
+  state.gapKm = Number(e.target.value);
+  writePref('gw.gapkm', String(state.gapKm));
+  void loadCoverage();
 });
 
 if (!PERSONAS[state.persona]) state.persona = 'acme-charge';
@@ -910,3 +1094,4 @@ if (state.tab !== 'ops' && state.tab !== 'how') state.tab = 'ops';
 initMap();
 void switchPersona(state.persona);
 setInterval(() => void refresh(), 5000);
+setInterval(() => void loadCoverage(), 60000);

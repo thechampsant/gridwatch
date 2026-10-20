@@ -43,13 +43,14 @@ const DATA_TABLES = [
 ];
 
 // Empty every table and load the 3-site pilot catalogue (no synthetic sites,
-// so assertions are about exactly the data the stubs describe).
-export async function resetDb(admin: Pool): Promise<void> {
+// so assertions are about exactly the data the stubs describe). Coverage tests
+// ask for the generated sites too, since density needs more than three points.
+export async function resetDb(admin: Pool, opts: { includeSynthetic?: boolean } = {}): Promise<void> {
   await admin.query(`TRUNCATE ${DATA_TABLES.join(', ')} RESTART IDENTITY CASCADE`);
   const seedDir = path.join(repoRoot, 'seed');
   const gazetteer = await loadGazetteer(seedDir);
   await withTx(admin, async (c) => {
-    await loadCatalog(c, { seedDir, connectionId: 'csms-main', csmsBaseUrl: 'http://vendor', includeSynthetic: false });
+    await loadCatalog(c, { seedDir, connectionId: 'csms-main', csmsBaseUrl: 'http://vendor', includeSynthetic: opts.includeSynthetic ?? false });
     await geocodePendingSites(c, [new OverrideStep(c), new CacheStep(c), new PostalGazetteerStep(gazetteer)]);
   });
 }

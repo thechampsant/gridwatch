@@ -60,6 +60,14 @@ export function extractPostalCode(address: string, country: string): string | nu
   return all.at(-1) ?? null; // postal codes come at the end of these addresses
 }
 
+// The town or city in an address, for naming areas: "…, Noida, UP 201301" ->
+// "Noida"; "…, 70173 Stuttgart" -> "Stuttgart".
+export function cityFromAddress(address: string, country: string): string | null {
+  if (country === 'IN') return /,\s*([^,]+?),\s*[A-Z]{2}\s+[1-9]\d{5}\s*$/.exec(address)?.[1] ?? null;
+  if (country === 'DE') return /\b\d{5}\s+([^,]+?)\s*$/.exec(address)?.[1] ?? null;
+  return null;
+}
+
 // Why no location could be found, for the review list.
 export function unresolvedReason(address: string, country: string): string {
   const code = extractPostalCode(address, country);

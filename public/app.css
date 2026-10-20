@@ -153,6 +153,14 @@ table.sessions td { padding: 10px 12px; border-top: 1px solid var(--line-2); ver
 .map.pinning { outline: 3px solid var(--blue); }
 .map.pinning .maplibregl-canvas { cursor: crosshair; }
 
+/* Coverage and density */
+.map-layers { display: flex; flex-wrap: wrap; align-items: center; gap: 0 18px; }
+.swatch { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.swatch.dashed { background: transparent !important; border: 1.5px dashed var(--ink-2); }
+.cov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px 24px; }
+.cov-grid h3 { margin: 0 0 6px; font-size: 14px; }
+.cov-grid p { margin: 0 0 8px; }
+
 /* How it works */
 .steps { margin: 0; padding-left: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 24px; }
 .steps li { color: var(--ink-2); }

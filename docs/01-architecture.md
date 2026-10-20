@@ -48,7 +48,8 @@ Five decisions shape everything else:
 
 **What was built (Part C)** to prove the riskiest part, the vendor semantics:
 - Ingest stubs → normalise → store → live status, nearest-available and daily settlement.
-- 43 tests aimed at the failure modes.
+- Coverage and density on the H3 grid, with supply-only gaps that follow live status.
+- 59 tests aimed at the failure modes.
 - The slice uses a Postgres inbox where production would use Kafka (decision D7).
 
 ---
@@ -351,6 +352,10 @@ The slice implements steps 1, 2 and 4 with demo data. Three synthetic sites cann
   - Chargers per km² by region = count ÷ `ST_Area(geom::geography) / 1e6`, materialised nightly.
   - For heatmaps and gap detection, an **H3** grid (the `h3` extension ships in the TimescaleDB image) at resolutions 6–8: charger counts per cell.
   - "Gap" = cells with demand signal (population, traffic or POI layers, a later data purchase) and no charger within X km.
+- **What the slice builds** (`src/geo/coverage.ts`, `/v1/coverage`, `/v1/coverage/gaps`):
+  - Density per H3 cell, computed per request. Resolution is capped at 6 (~36 km²), because most pins are postal-area centres (±2 km, about 12.6 km² of uncertainty); finer cells would be false precision. Cells with approximate pins are flagged.
+  - "Regions" are H3 resolution-4 areas (~1,770 km²) named after their main city, with chargers per 1,000 km². Admin polygons wait for an official boundary source.
+  - Gaps are supply only: inside each metro's service area (DBSCAN clusters of sites, convex hull + 2 km, resolution-7 cells), a **static gap** has no charger within X km and a **live gap** has chargers but none free and working now. A cell is marked uncertain when the deciding pin is a postal-area centre within 2 km of the limit.
 
 ### 7.3 Serving the map
 - **Static layer.** Site points and slowly changing attributes as **vector tiles** (MVT) from PostGIS (`ST_AsMVT` via Martin), with tenant-scoped URLs and short CDN TTLs. They are invalidated on catalogue change. Clustering at low zoom comes from tile aggregation.
